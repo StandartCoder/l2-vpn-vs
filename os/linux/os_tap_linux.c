@@ -39,12 +39,50 @@ int vp_os_tap_open(struct vp_os_tap **tap, const char *hint)
 
 int vp_os_tap_read(struct vp_os_tap *tap, uint8_t *buf, size_t max_len)
 {
-    return read(tap->fd, buf, max_len);
+    for (;;) {
+        ssize_t r = read(tap->fd, buf, max_len);
+        if (r > 0)
+            return (int)r;
+
+        if (r == 0)
+            return 0;
+
+        if (errno == EINTR)
+            continue;
+
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return 0;
+
+        return -1;
+    }
 }
 
 int vp_os_tap_write(struct vp_os_tap *tap, const uint8_t *buf, size_t len)
 {
-    return write(tap->fd, buf, len);
+    size_t off = 0;
+
+    while (off < len) {
+        ssize_t w = write(tap->fd, buf + off, len - off);
+        if (w > 0) {
+            off += (size_t)w;
+            continue;
+        }
+
+        if (w == 0)
+            continue;
+
+        if (errno == EINTR)
+            continue;
+
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Non-blocking TAP is temporarily full; treat as failure
+            return -1;
+        }
+
+        return -1;
+    }
+
+    return (int)len;
 }
 
 void vp_os_tap_close(struct vp_os_tap *tap)

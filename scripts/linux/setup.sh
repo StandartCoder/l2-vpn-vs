@@ -57,6 +57,9 @@ ip tuntap add dev tap0 mode tap
 echo "[*] Bringing tap0 up"
 ip link set tap0 up
 
+echo "[*] Setting MTU to 1400 on tap0"
+ip link set dev tap0 mtu 1400
+
 echo "[*] Assigning IP $IP/24"
 ip addr add "$IP/24" dev tap0
 

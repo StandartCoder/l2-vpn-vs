@@ -12,6 +12,69 @@
 static int g_running = 1;
 static struct vp_os_socket *g_sock = NULL;
 
+// Per-client TX rate limiting using a small timestamp ringbuffer per target.
+// Limits how many packets we send to a single client per time window.
+typedef struct {
+    uint32_t client_id;
+    uint64_t ts[8];  // small ring of send timestamps
+    int      count;
+    int      head;
+} vp_tx_rate_entry_t;
+
+static vp_tx_rate_entry_t g_tx_rate[VP_MAX_CLIENTS];
+
+static int vp_tx_rate_allow(uint32_t client_id, uint64_t now_ms)
+{
+    const uint64_t window_ms = 100;  // time window
+    const int max_pkts = 64;        // max packets per window per client
+
+    // Find or allocate entry for this client_id
+    vp_tx_rate_entry_t *e = NULL;
+    for (int i = 0; i < VP_MAX_CLIENTS; i++) {
+        if (g_tx_rate[i].client_id == client_id) {
+            e = &g_tx_rate[i];
+            break;
+        }
+        if (g_tx_rate[i].client_id == 0 && e == NULL) {
+            e = &g_tx_rate[i];
+        }
+    }
+
+    if (!e)
+        return 0;
+
+    if (e->client_id == 0) {
+        e->client_id = client_id;
+        e->count = 0;
+        e->head = 0;
+    }
+
+    // Drop timestamps older than window_ms
+    int new_count = 0;
+    for (int i = 0; i < e->count; i++) {
+        int idx = (e->head + i) % 8;
+        if (now_ms - e->ts[idx] <= window_ms) {
+            e->ts[(e->head + new_count) % 8] = e->ts[idx];
+            new_count++;
+        }
+    }
+    e->head = e->head % 8;
+    e->count = new_count;
+
+    if (e->count >= max_pkts)
+        return 0;
+
+    // Record this send
+    int idx = (e->head + e->count) % 8;
+    e->ts[idx] = now_ms;
+    if (e->count < 8)
+        e->count++;
+    else
+        e->head = (e->head + 1) % 8;
+
+    return 1;
+}
+
 static void handle_sigint(int sig)
 {
     printf("\n[switchd] Caught SIGINT, shutting down...\n");
@@ -33,6 +96,10 @@ static void forward_udp(uint32_t src_client_id,
     struct vp_os_addr dst;
 
     if (vp_switch_get_client_addr(dst_client_id, &dst) < 0)
+        return;
+
+    uint64_t now_ms = vp_os_linux_get_time_ms();
+    if (!vp_tx_rate_allow(dst_client_id, now_ms))
         return;
 
     uint8_t pkt[2000];

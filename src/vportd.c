@@ -246,8 +246,24 @@ int main(int argc, char **argv)
             }
 
             if (hdr.type == VP_PKT_ERROR) {
-                // later: evaluate proper error codes
-                printf("[vportd] Received ERROR packet (type=%u)\n", hdr.type);
+                // Server explicitly reports an error for this client.
+                // Drop current client_id and perform a reconnect HELLO.
+                printf("[vportd] Received ERROR packet (type=%u) → re-HELLO\n", hdr.type);
+
+                g_client_id = 0;
+                g_seq = 1;
+
+                if (vp_do_handshake(sock, &srv,
+                                    &last_recv,
+                                    &last_activity,
+                                    &last_keepalive,
+                                    &last_hello,
+                                    1) < 0) {
+                    // Handshake failed → short pause, then continue main loop
+                    usleep(500 * 1000);
+                }
+
+                break; // leave UDP receive loop after ERROR handling
             }
         }
 
@@ -264,7 +280,7 @@ int main(int argc, char **argv)
             }
 
             // --- BOUNDS CHECK: DROP ILLEGAL FRAMES ---
-            if (r > VP_MAX_FRAME_LEN) {
+            if (r > 1400) {
                 printf("[vportd] Drop TAP frame: too big (%d bytes)\n", r);
                 continue;
             }
@@ -288,38 +304,6 @@ int main(int argc, char **argv)
             vp_os_udp_send(sock, &srv, pkt, total);
 
             last_activity = now;
-        }
-
-        // -------------------------------
-        // 4) DETECT STALE CLIENT → RE-HELLO
-        // -------------------------------
-        // switch_core removes client_table after VP_MAC_TIMEOUT_MS ms.
-        // If we haven't seen anything from the server for a while and the last HELLO
-        // is also old → we assume our client_id is dead.
-        if (g_client_id != 0) {
-            uint64_t since_recv  = now - last_recv;
-            uint64_t since_hello = now - last_hello;
-
-            if (since_recv > VP_MAC_TIMEOUT_MS &&
-                since_hello > VP_MAC_TIMEOUT_MS)
-            {
-                printf("[vportd] No traffic from switch for %llu ms → "
-                       "assuming client_id stale, re-HELLO\n",
-                       (unsigned long long)since_recv);
-
-                g_client_id = 0;
-                g_seq = 1;
-
-                if (vp_do_handshake(sock, &srv,
-                                    &last_recv,
-                                    &last_activity,
-                                    &last_keepalive,
-                                    &last_hello,
-                                    1) < 0) {
-                    // Handshake failed → short pause, then try again
-                    usleep(500 * 1000);
-                }
-            }
         }
 
         // CPU relief

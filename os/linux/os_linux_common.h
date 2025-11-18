@@ -14,6 +14,7 @@
 #include <linux/if_tun.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 
 #define VP_LINUX_TAP_PATH "/dev/net/tun"
 
