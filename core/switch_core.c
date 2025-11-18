@@ -36,57 +36,6 @@ static void vp_flood_maybe_refill(uint64_t now_ms)
     }
 }
 
-void vp_switch_update_client(uint32_t client_id,
-                             const struct vp_os_addr *addr,
-                             uint64_t now_ms)
-{
-    if (client_id == 0 || client_id >= VP_CLIENT_MAX)
-        return;
-
-    vp_client_entry_t *e = &client_table[client_id];
-
-    if (e->in_use) {
-        if (e->addr.ip_be != addr->ip_be ||
-            e->addr.port_be != addr->port_be) {
-            client_addr_remove(&e->addr, e->client_id);
-        }
-    } else {
-        e->in_use = 1;
-        e->client_id = client_id;
-    }
-
-    e->addr = *addr;
-    e->last_seen_ms = now_ms;
-
-    client_addr_upsert(addr, client_id);
-}
-
-int vp_switch_get_client_addr(uint32_t client_id,
-                              struct vp_os_addr *out)
-{
-    if (client_id == 0 || client_id >= VP_CLIENT_MAX)
-        return -1;
-
-    vp_client_entry_t *e = &client_table[client_id];
-    if (!e->in_use)
-        return -1;
-
-    *out = e->addr;
-    return 0;
-}
-
-int vp_switch_get_client_id_for_addr(const struct vp_os_addr *addr,
-                                     uint32_t *out_client_id)
-{
-    vp_client_addr_entry_t *e = client_addr_find_entry(addr);
-    if (!e || !e->in_use)
-        return -1;
-
-    if (out_client_id)
-        *out_client_id = e->client_id;
-    return 0;
-}
-
 static int mac_equal(const vp_mac_t *a, const vp_mac_t *b)
 {
     return memcmp(a->b, b->b, 6) == 0;
@@ -196,6 +145,57 @@ static void client_addr_remove(const struct vp_os_addr *addr, uint32_t client_id
             return;
         }
     }
+}
+
+void vp_switch_update_client(uint32_t client_id,
+                             const struct vp_os_addr *addr,
+                             uint64_t now_ms)
+{
+    if (client_id == 0 || client_id >= VP_CLIENT_MAX)
+        return;
+
+    vp_client_entry_t *e = &client_table[client_id];
+
+    if (e->in_use) {
+        if (e->addr.ip_be != addr->ip_be ||
+            e->addr.port_be != addr->port_be) {
+            client_addr_remove(&e->addr, e->client_id);
+        }
+    } else {
+        e->in_use = 1;
+        e->client_id = client_id;
+    }
+
+    e->addr = *addr;
+    e->last_seen_ms = now_ms;
+
+    client_addr_upsert(addr, client_id);
+}
+
+int vp_switch_get_client_addr(uint32_t client_id,
+                              struct vp_os_addr *out)
+{
+    if (client_id == 0 || client_id >= VP_CLIENT_MAX)
+        return -1;
+
+    vp_client_entry_t *e = &client_table[client_id];
+    if (!e->in_use)
+        return -1;
+
+    *out = e->addr;
+    return 0;
+}
+
+int vp_switch_get_client_id_for_addr(const struct vp_os_addr *addr,
+                                     uint32_t *out_client_id)
+{
+    vp_client_addr_entry_t *e = client_addr_find_entry(addr);
+    if (!e || !e->in_use)
+        return -1;
+
+    if (out_client_id)
+        *out_client_id = e->client_id;
+    return 0;
 }
 
 void vp_switch_init(void)
