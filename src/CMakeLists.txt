@@ -1,5 +1,11 @@
 add_executable(switchd switchd.c)
 add_executable(vportd vportd.c)
 
-target_link_libraries(switchd core)
-target_link_libraries(vportd core)
+if (APPLE)
+    target_link_libraries(vportd core os_macos)
+elseif (WIN32)
+    target_link_libraries(vportd core os_windows)
+else()
+    target_link_libraries(switchd core os_linux)
+    target_link_libraries(vportd core os_linux)
+endif()

@@ -1,8 +1,10 @@
 #include "../include/os_tap.h"
 #include "../include/os_net.h"
+#include "../os/linux/os_linux_common.h"
 #include "../core/protocol.h"
 #include <stdio.h>
 #include <arpa/inet.h>
+#include <string.h>
 
 static uint32_t g_client_id = 0;
 
@@ -55,27 +57,87 @@ int main(int argc, char **argv)
     uint8_t frame[2000];
     uint8_t pkt[2000 + sizeof(vp_header_t)];
 
-    while (1) {
-    // TAP
-    int r = vp_os_tap_read(tap, frame, sizeof(frame));
-    if (r > 0) {
-        vp_header_t h = { VP_VERSION, VP_PKT_DATA, 0, g_client_id, 0 };
-        int hdr_len = vp_encode_header(pkt, sizeof(pkt), &h);
-        memcpy(pkt + hdr_len, frame, r);
-        vp_os_udp_send(sock, &srv, pkt, hdr_len + r);
-    }
+    uint64_t last_keepalive = 0;
+    uint64_t last_activity = 0;
+    uint64_t last_recv = 0;
 
-    // UDP
-    struct vp_os_addr src;
-    uint8_t buf[2000];
-    int u = vp_os_udp_recv(sock, &src, buf, sizeof(buf));
-    if (u > 0) {
-        vp_header_t hdr;
-        if (vp_decode_header(buf, u, &hdr) >= 0 && hdr.type == VP_PKT_DATA) {
-            vp_os_tap_write(tap,
-                            buf + sizeof(vp_header_t),
-                            u - sizeof(vp_header_t));
+    int keepalive_interval = 5000;
+    int keepalive_success = 0;
+
+    while (1) {
+
+        uint64_t now = vp_os_linux_get_time_ms();
+
+        // -------------------------------
+        // 1) ADAPTIVE KEEPALIVE LOGIC
+        // -------------------------------
+
+        // Increase interval if we managed 3 successful cycles
+        if (keepalive_success >= 3 && keepalive_interval != 10000) {
+            keepalive_interval = 10000;
+            printf("[vportd] Keepalive raised to 10s\n");
         }
+
+        // If no incoming/outgoing traffic in 20 seconds → drop back to 5s
+        if (now - last_activity > 20000 && keepalive_interval != 5000) {
+            keepalive_interval = 5000;
+            keepalive_success = 0;
+            printf("[vportd] Keepalive dropped to 5s (idle)\n");
+        }
+
+        // Send keepalive if needed
+        if (now - last_keepalive >= (uint64_t)keepalive_interval) {
+            vp_header_t keep = { VP_VERSION, VP_PKT_KEEPALIVE, 0, g_client_id, 0 };
+            vp_os_udp_send(sock, &srv, (uint8_t*)&keep, sizeof(keep));
+
+            last_keepalive = now;
+            keepalive_success++;   // count each successful send
+        }
+
+
+        // -------------------------------
+        // 2) UDP RECEIVE PATH
+        // -------------------------------
+        struct vp_os_addr src;
+        uint8_t buf[2000];
+
+        int u;
+        while ((u = vp_os_udp_recv(sock, &src, buf, sizeof(buf))) > 0) {
+            last_recv = now; // network activity
+
+            vp_header_t hdr;
+            if (vp_decode_header(buf, u, &hdr) >= 0 &&
+                hdr.type == VP_PKT_DATA)
+            {
+                vp_os_tap_write(tap,
+                                buf + sizeof(vp_header_t),
+                                u - sizeof(vp_header_t));
+            }
+        }
+
+
+        // -------------------------------
+        // 3) TAP FRAME SEND PATH
+        // -------------------------------
+        int r;
+        while ((r = vp_os_tap_read(tap, frame, sizeof(frame))) > 0) {
+
+            last_activity = now;    // outbound traffic
+
+            vp_header_t h = {
+                VP_VERSION,
+                VP_PKT_DATA,
+                0,
+                g_client_id,
+                0
+            };
+
+            int hdr_len = vp_encode_header(pkt, sizeof(pkt), &h);
+            memcpy(pkt + hdr_len, frame, r);
+            vp_os_udp_send(sock, &srv, pkt, hdr_len + r);
+        }
+
+        // CPU relief
+        usleep(1000);
     }
-}
 }

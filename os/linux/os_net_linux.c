@@ -32,6 +32,9 @@ int vp_os_udp_open(struct vp_os_socket **sock,
         return -1;
     }
 
+    int flags = fcntl(s->fd, F_GETFL, 0);
+    fcntl(s->fd, F_SETFL, flags | O_NONBLOCK);
+
     *sock = s;
     return 0;
 }

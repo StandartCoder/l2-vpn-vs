@@ -8,4 +8,5 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 include_directories(include)
 
 add_subdirectory(core)
+add_subdirectory(os)
 add_subdirectory(src)

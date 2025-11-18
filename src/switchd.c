@@ -1,9 +1,11 @@
 #include "../core/switch_core.h"
+#include "../os/linux/os_linux_common.h"
 #include "../include/os_net.h"
 #include "../core/protocol.h"
 #include "../include/vp_types.h"
 #include <arpa/inet.h>
 #include <stdio.h>
+#include <string.h>
 
 static struct vp_os_socket *g_sock;
 
@@ -92,6 +94,11 @@ int main(int argc, char **argv)
                 now,
                 forward_udp
             );
+        }
+
+        if (hdr.type == VP_PKT_KEEPALIVE) {
+            vp_switch_update_client(hdr.client_id, &src, now);
+            continue; // no frame forwarding
         }
 
         if (hdr.type == VP_PKT_HELLO) {

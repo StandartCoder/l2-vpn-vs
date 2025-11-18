@@ -11,6 +11,10 @@ struct vp_os_tap {
 int vp_os_tap_open(struct vp_os_tap **tap, const char *hint)
 {
     int fd = open(VP_LINUX_TAP_PATH, O_RDWR);
+    
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
     if (fd < 0)
         return -1;
 
