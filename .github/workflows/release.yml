@@ -1,0 +1,117 @@
+name: Manual Release Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: "Version bump type"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  version:
+    name: Prepare Version
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.bump.outputs.new }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Read current version
+        id: read
+        run: |
+          if [ ! -f VERSION ]; then echo "0.1.0" > VERSION; fi
+          echo "current=$(cat VERSION)" >> $GITHUB_OUTPUT
+
+      - name: Bump version
+        id: bump
+        run: |
+          current="${{ steps.read.outputs.current }}"
+          part="${{ github.event.inputs.version_type }}"
+          IFS='.' read -r major minor patch <<< "$current"
+
+          if [ "$part" = "major" ]; then major=$((major+1)); minor=0; patch=0; fi
+          if [ "$part" = "minor" ]; then minor=$((minor+1)); patch=0; fi
+          if [ "$part" = "patch" ]; then patch=$((patch+1)); fi
+
+          new="$major.$minor.$patch"
+
+          echo "$new" > VERSION
+          echo "new=$new" >> $GITHUB_OUTPUT
+
+      - name: Commit + Tag
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add VERSION
+          git commit -m "Release v${{ steps.bump.outputs.new }}"
+          git tag v${{ steps.bump.outputs.new }}
+          git push origin --follow-tags
+
+  build:
+    name: Build for all platforms
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt update && sudo apt install -y cmake build-essential
+
+      - name: Install deps (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install cmake
+
+      - name: Install deps (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package Artifact
+        run: |
+          VERSION="${{ needs.version.outputs.new_version }}"
+          OUT="vpnet-${VERSION}"
+
+          mkdir out
+
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            cp build/switchd build/vportd out/
+            tar -czvf "${OUT}-linux-x86_64.tar.gz" -C out .
+          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            cp build/switchd build/vportd out/
+            zip -r "${OUT}-macos-arm64.zip" out/
+          else
+            cp build/Release/switchd.exe build/Release/vportd.exe out/
+            zip -r "${OUT}-windows-x64.zip" out/
+          fi
+
+      - name: Upload Release Files
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.version.outputs.new_version }}
+          files: |
+            vpnet-${{ needs.version.outputs.new_version }}-linux-x86_64.tar.gz
+            vpnet-${{ needs.version.outputs.new_version }}-macos-arm64.zip
+            vpnet-${{ needs.version.outputs.new_version }}-windows-x64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
