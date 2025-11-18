@@ -4,6 +4,30 @@
 #include <stdio.h>
 #include <arpa/inet.h>
 
+#include "../include/os_net.h"
+#include "../core/protocol.h"
+#include "../include/vp_types.h"
+
+static struct vp_os_socket *g_sock;
+
+static void forward_udp(uint32_t dst_client_id,
+                        const uint8_t *frame,
+                        size_t len)
+{
+    struct vp_os_addr dst;
+
+    if (vp_switch_get_client_addr(dst_client_id, &dst) < 0)
+        return;
+
+    uint8_t pkt[2000];
+    vp_header_t hdr = { VP_VERSION, VP_PKT_DATA, 0, dst_client_id, 0 };
+
+    int hlen = vp_encode_header(pkt, sizeof(pkt), &hdr);
+    memcpy(pkt + hlen, frame, len);
+
+    vp_os_udp_send(g_sock, &dst, pkt, hlen + len);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
@@ -35,11 +59,13 @@ int main(int argc, char **argv)
             continue;
 
         if (hdr.type == VP_PKT_DATA) {
+            vp_switch_update_client(hdr.client_id, &src, 0);
+            
             vp_switch_handle_frame(
                 hdr.client_id,
                 buf + sizeof(vp_header_t),
                 r - sizeof(vp_header_t),
-                NULL // TODO: real forwarder comes in Phase 3
+                forward_udp
             );
         }
     }

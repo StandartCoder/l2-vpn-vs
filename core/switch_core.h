@@ -5,6 +5,22 @@
 #include <stddef.h>
 #include "../include/vp_types.h"
 
+struct vp_os_addr; // forward declaration
+
+typedef struct {
+    int in_use;
+    uint32_t client_id;
+    struct vp_os_addr addr;
+    uint64_t last_seen_ms;
+} vp_client_entry_t;
+
+void vp_switch_update_client(uint32_t client_id,
+                             const struct vp_os_addr *addr,
+                             uint64_t now_ms);
+
+int vp_switch_get_client_addr(uint32_t client_id,
+                              struct vp_os_addr *out);
+
 // Callback used by switch_core to forward frames
 typedef void (*vp_forward_cb)(
     uint32_t dst_client_id,

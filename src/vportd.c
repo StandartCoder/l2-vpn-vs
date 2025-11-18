@@ -31,6 +31,9 @@ int main(int argc, char **argv)
 
     printf("[vportd] TAP: %s\n", tapname);
 
+    vp_header_t hello = { VP_VERSION, VP_PKT_HELLO, 0, 1, 0 };
+    vp_os_udp_send(sock, &srv, (uint8_t*)&hello, sizeof(hello));
+
     uint8_t frame[2000];
     uint8_t pkt[2000 + sizeof(vp_header_t)];
 

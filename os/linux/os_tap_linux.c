@@ -1,3 +1,4 @@
+#include "os_linux_common.h"
 #include "../../include/os_tap.h"
 
 #include <stdlib.h>

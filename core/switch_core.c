@@ -1,7 +1,47 @@
 #include "switch_core.h"
 #include <string.h>
 
+#include "../include/os_net.h"
+
 static vp_mac_entry_t mac_table[VP_MAX_CLIENTS];
+static vp_client_entry_t client_table[VP_MAX_CLIENTS];
+
+void vp_switch_update_client(uint32_t client_id,
+                             const struct vp_os_addr *addr,
+                             uint64_t now_ms)
+{
+    for (int i = 0; i < VP_MAX_CLIENTS; i++) {
+        if (client_table[i].in_use &&
+            client_table[i].client_id == client_id) {
+            client_table[i].addr = *addr;
+            client_table[i].last_seen_ms = now_ms;
+            return;
+        }
+    }
+
+    for (int i = 0; i < VP_MAX_CLIENTS; i++) {
+        if (!client_table[i].in_use) {
+            client_table[i].in_use = 1;
+            client_table[i].client_id = client_id;
+            client_table[i].addr = *addr;
+            client_table[i].last_seen_ms = now_ms;
+            return;
+        }
+    }
+}
+
+int vp_switch_get_client_addr(uint32_t client_id,
+                              struct vp_os_addr *out)
+{
+    for (int i = 0; i < VP_MAX_CLIENTS; i++) {
+        if (client_table[i].in_use &&
+            client_table[i].client_id == client_id) {
+            *out = client_table[i].addr;
+            return 0;
+        }
+    }
+    return -1;
+}
 
 static int mac_equal(const vp_mac_t *a, const vp_mac_t *b)
 {
