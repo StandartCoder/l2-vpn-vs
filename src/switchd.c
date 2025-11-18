@@ -105,10 +105,21 @@ int main(int argc, char **argv)
         if (hdr.type == VP_PKT_DATA) {
             vp_switch_update_client(hdr.client_id, &src, now);
 
+            int payload_len = r - sizeof(vp_header_t);
+
+            // Header too small?
+            if (r < sizeof(vp_header_t)) continue;
+
+            // invalid or overflow?
+            if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN) {
+                printf("[switchd] Drop bad frame: size=%d\n", payload_len);
+                continue;
+            }
+
             vp_switch_handle_frame(
                 hdr.client_id,
                 buf + sizeof(vp_header_t),
-                r - sizeof(vp_header_t),
+                payload_len,
                 now,
                 forward_udp
             );

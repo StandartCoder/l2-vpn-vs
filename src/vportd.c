@@ -135,12 +135,22 @@ int main(int argc, char **argv)
             last_recv = now; // network activity
 
             vp_header_t hdr;
+            if (u < sizeof(vp_header_t)) continue; // too small → invalid
+
             if (vp_decode_header(buf, u, &hdr) >= 0 &&
                 hdr.type == VP_PKT_DATA)
             {
+                int payload_len = u - sizeof(vp_header_t);
+
+                // BOUNDS CHECK
+                if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN) {
+                    printf("[vportd] Drop UDP frame: invalid size %d\n", payload_len);
+                    continue;
+                }
+
                 vp_os_tap_write(tap,
                                 buf + sizeof(vp_header_t),
-                                u - sizeof(vp_header_t));
+                                payload_len);
             }
         }
 
@@ -151,7 +161,11 @@ int main(int argc, char **argv)
         int r;
         while ((r = vp_os_tap_read(tap, frame, sizeof(frame))) > 0) {
 
-            last_activity = now;    // outbound traffic
+            // --- BOUNDS CHECK: DROP ILLEGAL FRAMES ---
+            if (r > VP_MAX_FRAME_LEN) {
+                printf("[vportd] Drop TAP frame: too big (%d bytes)\n", r);
+                continue;
+            }
 
             vp_header_t h = {
                 VP_VERSION,

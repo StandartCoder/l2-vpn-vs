@@ -80,7 +80,7 @@ void vp_switch_handle_frame(
     vp_forward_cb forwarder
 )
 {
-    if (frame_len < 14)
+    if (frame_len < 14 || frame_len > VP_MAX_FRAME_LEN)
         return;
 
     vp_mac_t dst, src;
