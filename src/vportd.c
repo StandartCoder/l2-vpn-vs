@@ -5,8 +5,32 @@
 #include <stdio.h>
 #include <arpa/inet.h>
 #include <string.h>
+#include <signal.h>
+#include <stdlib.h>
+
+static struct vp_os_tap *g_tap = NULL;
+static struct vp_os_socket *g_sock = NULL;
+static int g_running = 1;
 
 static uint32_t g_client_id = 0;
+
+static void handle_sigint(int sig)
+{
+    printf("\n[vportd] Caught SIGINT, shutting down...\n");
+    g_running = 0;
+
+    if (g_tap) {
+        vp_os_tap_close(g_tap);
+        printf("[vportd] TAP closed\n");
+    }
+
+    if (g_sock) {
+        vp_os_udp_close(g_sock);
+        printf("[vportd] UDP socket closed\n");
+    }
+
+    exit(0);
+}
 
 int main(int argc, char **argv)
 {
@@ -14,6 +38,8 @@ int main(int argc, char **argv)
         printf("Usage: vportd <server_ip> <server_port> <tapname>\n");
         return 1;
     }
+
+    signal(SIGINT, handle_sigint);
 
     const char *server_ip = argv[1];
     uint16_t sport_be = htons(atoi(argv[2]));
@@ -32,6 +58,9 @@ int main(int argc, char **argv)
         printf("Failed to open UDP socket\n");
         return 1;
     }
+
+    g_tap = tap;
+    g_sock = sock;
 
     printf("[vportd] TAP: %s\n", tapname);
 
@@ -64,7 +93,7 @@ int main(int argc, char **argv)
     int keepalive_interval = 5000;
     int keepalive_success = 0;
 
-    while (1) {
+    while (g_running) {
 
         uint64_t now = vp_os_linux_get_time_ms();
 

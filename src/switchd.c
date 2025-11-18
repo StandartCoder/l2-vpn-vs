@@ -6,8 +6,24 @@
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <string.h>
+#include <signal.h>
+#include <stdlib.h>
 
-static struct vp_os_socket *g_sock;
+static int g_running = 1;
+static struct vp_os_socket *g_sock = NULL;
+
+static void handle_sigint(int sig)
+{
+    printf("\n[switchd] Caught SIGINT, shutting down...\n");
+    g_running = 0;
+
+    if (g_sock) {
+        vp_os_udp_close(g_sock);
+        printf("[switchd] UDP socket closed\n");
+    }
+
+    exit(0);
+}
 
 static void forward_udp(uint32_t src_client_id,
                         uint32_t dst_client_id,
@@ -56,6 +72,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    signal(SIGINT, handle_sigint);
+
     uint16_t port_be = htons(atoi(argv[1]));
 
     struct vp_os_socket *sock;
@@ -73,7 +91,7 @@ int main(int argc, char **argv)
 
     printf("[switchd] Listening on UDP port %d\n", ntohs(port_be));
 
-    while (1) {
+    while (g_running) {
         uint64_t now = vp_os_linux_get_time_ms();
         vp_switch_flush_stale(now);
 
