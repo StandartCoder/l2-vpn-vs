@@ -13,6 +13,7 @@ static struct vp_os_socket *g_sock = NULL;
 static int g_running = 1;
 
 static uint32_t g_client_id = 0;
+static uint32_t g_seq = 1;
 
 static void handle_sigint(int sig)
 {
@@ -135,7 +136,7 @@ int main(int argc, char **argv)
                 .payload_len = 0,
                 .flags = 0,
                 .client_id = g_client_id,
-                .seq = seq++,
+                .seq = g_seq++,
                 .checksum = 0
             };
             vp_os_udp_send(sock, &srv, (uint8_t*)&keep, sizeof(vp_header_t));
@@ -172,6 +173,8 @@ int main(int argc, char **argv)
                 if (crc != hdr.checksum)
                     continue;
 
+                last_activity = now; // valid data → activity
+
                 vp_os_tap_write(tap, buf + hdr.header_len, payload_len);
             }
         }
@@ -189,8 +192,6 @@ int main(int argc, char **argv)
                 continue;
             }
 
-            static uint32_t seq = 1;
-
             vp_header_t hdr = {
                 .magic = VP_MAGIC,
                 .version = VP_VERSION,
@@ -199,12 +200,14 @@ int main(int argc, char **argv)
                 .payload_len = r, // r = TAP bytes
                 .flags = 0,
                 .client_id = g_client_id,   // LOCAL CLIENT
-                .seq = seq++,
+                .seq = g_seq++,
                 .checksum = vp_crc32(frame, r)
             };
 
             int total = vp_encode_packet(pkt, sizeof(pkt), &hdr, frame);
             vp_os_udp_send(sock, &srv, pkt, total);
+
+            last_activity = now; // outgoing data → activity
         }
 
         // CPU relief
