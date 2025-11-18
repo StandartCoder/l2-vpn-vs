@@ -48,10 +48,10 @@ static int vp_do_handshake(struct vp_os_socket *sock,
         .magic      = VP_MAGIC,
         .version    = VP_VERSION,
         .type       = VP_PKT_HELLO,
-        .header_len = sizeof(vp_header_t),
+        .header_len = VP_HEADER_WIRE_LEN,
         .payload_len= 0,
         .flags      = 0,
-        .client_id  = 0,   // clientid=0 for new id
+        .client_id  = 0,   // client_id never sent by client
         .seq        = 0,
         .checksum   = 0
     };
@@ -62,7 +62,14 @@ static int vp_do_handshake(struct vp_os_socket *sock,
         printf("[vportd] Initial HELLO → requesting client_id\n");
     }
 
-    vp_os_udp_send(sock, srv, (uint8_t*)&hello, sizeof(vp_header_t));
+    uint8_t hello_pkt[VP_HEADER_WIRE_LEN];
+    int hello_len = vp_encode_packet(hello_pkt, sizeof(hello_pkt), &hello, NULL);
+    if (hello_len < 0) {
+        printf("[vportd] Failed to encode HELLO packet\n");
+        return -1;
+    }
+
+    vp_os_udp_send(sock, srv, hello_pkt, (size_t)hello_len);
     *last_hello = now;
 
     uint64_t deadline = now + 3000; // 3s Timeout for HELLO_ACK
@@ -132,7 +139,7 @@ int main(int argc, char **argv)
     printf("[vportd] TAP: %s\n", tapname);
 
     uint8_t frame[2000];
-    uint8_t pkt[2000 + sizeof(vp_header_t)];
+    uint8_t pkt[2000 + VP_HEADER_WIRE_LEN];
 
     uint64_t last_keepalive = 0;
     uint64_t last_activity  = 0;
@@ -184,14 +191,17 @@ int main(int argc, char **argv)
                 .magic      = VP_MAGIC,
                 .version    = VP_VERSION,
                 .type       = VP_PKT_KEEPALIVE,
-                .header_len = sizeof(vp_header_t),
+                .header_len = VP_HEADER_WIRE_LEN,
                 .payload_len= 0,
                 .flags      = 0,
-                .client_id  = g_client_id,
+                .client_id  = 0,   // never send client_id
                 .seq        = g_seq++,
                 .checksum   = 0
             };
-            vp_os_udp_send(sock, &srv, (uint8_t*)&keep, sizeof(vp_header_t));
+
+            int keep_len = vp_encode_packet(pkt, sizeof(pkt), &keep, NULL);
+            if (keep_len > 0)
+                vp_os_udp_send(sock, &srv, pkt, (size_t)keep_len);
 
             last_keepalive = now;
             keepalive_success++;
@@ -208,16 +218,21 @@ int main(int argc, char **argv)
             last_recv = now; // something from the server
 
             vp_header_t hdr;
-            if (u < (int)sizeof(vp_header_t)) continue; // too small
+            if (u < (int)VP_HEADER_WIRE_LEN) continue; // too small
 
             if (vp_decode_header(buf, u, &hdr) < 0)
                 continue;
 
             if (hdr.type == VP_PKT_DATA) {
                 int payload_len = hdr.payload_len;
+                size_t header_len = hdr.header_len;
 
                 // Bounds
                 if (payload_len <= 0 || payload_len > VP_MAX_FRAME_LEN)
+                    continue;
+
+                // Full packet bounds check: header + payload must fit into u
+                if (header_len + (size_t)payload_len > (size_t)u)
                     continue;
 
                 // CRC
@@ -258,10 +273,10 @@ int main(int argc, char **argv)
                 .magic      = VP_MAGIC,
                 .version    = VP_VERSION,
                 .type       = VP_PKT_DATA,
-                .header_len = sizeof(vp_header_t),
+                .header_len = VP_HEADER_WIRE_LEN,
                 .payload_len= r,
                 .flags      = 0,
-                .client_id  = g_client_id,
+                .client_id  = 0,   // never send client_id
                 .seq        = g_seq++,
                 .checksum   = vp_crc32(frame, r)
             };

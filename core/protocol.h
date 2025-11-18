@@ -6,13 +6,14 @@
 
 #define VP_MAGIC 0x56504E32  // "VPN2"
 #define VP_VERSION 2
+#define VP_HEADER_WIRE_LEN 24
 
 #pragma pack(push, 1)
 typedef struct {
     uint32_t magic;        // VP_MAGIC
     uint8_t  version;      // VP_VERSION
     uint8_t  type;         // VP_PKT_*
-    uint16_t header_len;   // sizeof(vp_header_t)
+    uint16_t header_len;   // header length on wire (bytes)
     uint16_t payload_len;  // Length of Ethernet frame
     uint16_t flags;
     uint32_t client_id;

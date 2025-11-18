@@ -22,6 +22,10 @@ void vp_switch_update_client(uint32_t client_id,
 int vp_switch_get_client_addr(uint32_t client_id,
                               struct vp_os_addr *out);
 
+// Look up client_id by remote UDP address
+int vp_switch_get_client_id_for_addr(const struct vp_os_addr *addr,
+                                     uint32_t *out_client_id);
+
 // Callback used by switch_core to forward frames
 typedef void (*vp_forward_cb)(
     uint32_t src_client_id,

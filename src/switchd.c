@@ -42,7 +42,7 @@ static void forward_udp(uint32_t src_client_id,
         .magic = VP_MAGIC,
         .version = VP_VERSION,
         .type = VP_PKT_DATA,
-        .header_len = sizeof(vp_header_t),
+        .header_len = VP_HEADER_WIRE_LEN,
         .payload_len = len,
         .flags = 0,
         .client_id = src_client_id,
@@ -109,9 +109,14 @@ int main(int argc, char **argv)
             continue;
 
         int payload_len = hdr.payload_len;
+        size_t header_len = hdr.header_len;
 
         // Bounds check
         if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN)
+            continue;
+
+        // Full packet bounds check: header + payload must fit into r
+        if (header_len + (size_t)payload_len > (size_t)r)
             continue;
 
         // Verify checksum
@@ -120,12 +125,13 @@ int main(int argc, char **argv)
             continue;
 
         if (hdr.type == VP_PKT_DATA) {
-            vp_switch_update_client(hdr.client_id, &src, now);
+            uint32_t src_client_id;
+            if (vp_switch_get_client_id_for_addr(&src, &src_client_id) < 0)
+                continue;
+
+            vp_switch_update_client(src_client_id, &src, now);
 
             int payload_len = hdr.payload_len;
-
-            // Header too small?
-            if (r < hdr.header_len) continue;
 
             // invalid or overflow?
             if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN) {
@@ -134,7 +140,7 @@ int main(int argc, char **argv)
             }
 
             vp_switch_handle_frame(
-                hdr.client_id,
+                src_client_id,
                 buf + hdr.header_len,
                 payload_len,
                 now,
@@ -143,7 +149,11 @@ int main(int argc, char **argv)
         }
 
         if (hdr.type == VP_PKT_KEEPALIVE) {
-            vp_switch_update_client(hdr.client_id, &src, now);
+            uint32_t src_client_id;
+            if (vp_switch_get_client_id_for_addr(&src, &src_client_id) < 0)
+                continue;
+
+            vp_switch_update_client(src_client_id, &src, now);
             continue; // no frame forwarding
         }
 
@@ -160,7 +170,7 @@ int main(int argc, char **argv)
                 .magic = VP_MAGIC,
                 .version = VP_VERSION,
                 .type = VP_PKT_HELLO_ACK,
-                .header_len = sizeof(vp_header_t),
+                .header_len = VP_HEADER_WIRE_LEN,
                 .payload_len = 0,
                 .flags = 0,
                 .client_id = new_id,
@@ -168,7 +178,10 @@ int main(int argc, char **argv)
                 .checksum = 0
             };
 
-            vp_os_udp_send(g_sock, &src, (uint8_t*)&ack, sizeof(vp_header_t));
+            uint8_t pkt[VP_HEADER_WIRE_LEN];
+            int ack_len = vp_encode_packet(pkt, sizeof(pkt), &ack, NULL);
+            if (ack_len > 0)
+                vp_os_udp_send(g_sock, &src, pkt, (size_t)ack_len);
             continue;
         }
     }

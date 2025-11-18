@@ -43,6 +43,21 @@ int vp_switch_get_client_addr(uint32_t client_id,
     return -1;
 }
 
+int vp_switch_get_client_id_for_addr(const struct vp_os_addr *addr,
+                                     uint32_t *out_client_id)
+{
+    for (int i = 0; i < VP_MAX_CLIENTS; i++) {
+        if (client_table[i].in_use &&
+            client_table[i].addr.ip_be == addr->ip_be &&
+            client_table[i].addr.port_be == addr->port_be) {
+            if (out_client_id)
+                *out_client_id = client_table[i].client_id;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static int mac_equal(const vp_mac_t *a, const vp_mac_t *b)
 {
     return memcmp(a->b, b->b, 6) == 0;
