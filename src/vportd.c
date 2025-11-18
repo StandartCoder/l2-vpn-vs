@@ -64,8 +64,19 @@ int main(int argc, char **argv)
 
     printf("[vportd] TAP: %s\n", tapname);
 
-    vp_header_t hello = { VP_VERSION, VP_PKT_HELLO, 0, 0, 0 }; // client_id=0 for id request
-    vp_os_udp_send(sock, &srv, (uint8_t*)&hello, sizeof(hello));
+    vp_header_t hello = {
+        .magic = VP_MAGIC,
+        .version = VP_VERSION,
+        .type = VP_PKT_HELLO,
+        .header_len = sizeof(vp_header_t),
+        .payload_len = 0,
+        .flags = 0,
+        .client_id = 0, // clientid=0 for id request
+        .seq = 0,
+        .checksum = 0
+    };
+
+    vp_os_udp_send(sock, &srv, (uint8_t*)&hello, sizeof(vp_header_t));
 
     while (g_client_id == 0) {
         struct vp_os_addr src;
@@ -116,8 +127,18 @@ int main(int argc, char **argv)
 
         // Send keepalive if needed
         if (now - last_keepalive >= (uint64_t)keepalive_interval) {
-            vp_header_t keep = { VP_VERSION, VP_PKT_KEEPALIVE, 0, g_client_id, 0 };
-            vp_os_udp_send(sock, &srv, (uint8_t*)&keep, sizeof(keep));
+            vp_header_t keep = {
+                .magic = VP_MAGIC,
+                .version = VP_VERSION,
+                .type = VP_PKT_KEEPALIVE,
+                .header_len = sizeof(vp_header_t),
+                .payload_len = 0,
+                .flags = 0,
+                .client_id = g_client_id,
+                .seq = seq++,
+                .checksum = 0
+            };
+            vp_os_udp_send(sock, &srv, (uint8_t*)&keep, sizeof(vp_header_t));
 
             last_keepalive = now;
             keepalive_success++;   // count each successful send
@@ -140,17 +161,18 @@ int main(int argc, char **argv)
             if (vp_decode_header(buf, u, &hdr) >= 0 &&
                 hdr.type == VP_PKT_DATA)
             {
-                int payload_len = u - sizeof(vp_header_t);
+                int payload_len = hdr.payload_len;
 
-                // BOUNDS CHECK
-                if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN) {
-                    printf("[vportd] Drop UDP frame: invalid size %d\n", payload_len);
+                // Bounds
+                if (payload_len <= 0 || payload_len > VP_MAX_FRAME_LEN)
                     continue;
-                }
 
-                vp_os_tap_write(tap,
-                                buf + sizeof(vp_header_t),
-                                payload_len);
+                // CRC
+                uint32_t crc = vp_crc32(buf + hdr.header_len, payload_len);
+                if (crc != hdr.checksum)
+                    continue;
+
+                vp_os_tap_write(tap, buf + hdr.header_len, payload_len);
             }
         }
 
@@ -167,17 +189,22 @@ int main(int argc, char **argv)
                 continue;
             }
 
-            vp_header_t h = {
-                VP_VERSION,
-                VP_PKT_DATA,
-                0,
-                g_client_id,
-                0
+            static uint32_t seq = 1;
+
+            vp_header_t hdr = {
+                .magic = VP_MAGIC,
+                .version = VP_VERSION,
+                .type = VP_PKT_DATA,
+                .header_len = sizeof(vp_header_t),
+                .payload_len = r, // r = TAP bytes
+                .flags = 0,
+                .client_id = g_client_id,   // LOCAL CLIENT
+                .seq = seq++,
+                .checksum = vp_crc32(frame, r)
             };
 
-            int hdr_len = vp_encode_header(pkt, sizeof(pkt), &h);
-            memcpy(pkt + hdr_len, frame, r);
-            vp_os_udp_send(sock, &srv, pkt, hdr_len + r);
+            int total = vp_encode_packet(pkt, sizeof(pkt), &hdr, frame);
+            vp_os_udp_send(sock, &srv, pkt, total);
         }
 
         // CPU relief

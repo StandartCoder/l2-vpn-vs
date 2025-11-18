@@ -4,8 +4,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define VP_VERSION 1
-
 // Packet types
 enum vp_pkt_type {
     VP_PKT_HELLO      = 1,

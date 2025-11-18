@@ -36,18 +36,22 @@ static void forward_udp(uint32_t src_client_id,
         return;
 
     uint8_t pkt[2000];
+    static uint32_t g_seq = 1;
+
     vp_header_t hdr = {
-        VP_VERSION,
-        VP_PKT_DATA,
-        0,
-        src_client_id,
-        0
+        .magic = VP_MAGIC,
+        .version = VP_VERSION,
+        .type = VP_PKT_DATA,
+        .header_len = sizeof(vp_header_t),
+        .payload_len = len,
+        .flags = 0,
+        .client_id = src_client_id,
+        .seq = g_seq++,
+        .checksum = vp_crc32(frame, len)
     };
 
-    int hlen = vp_encode_header(pkt, sizeof(pkt), &hdr);
-    memcpy(pkt + hlen, frame, len);
-
-    vp_os_udp_send(g_sock, &dst, pkt, hlen + len);
+    int total = vp_encode_packet(pkt, sizeof(pkt), &hdr, frame);
+    vp_os_udp_send(g_sock, &dst, pkt, total);
 }
 
 static uint32_t vp_alloc_client_id(void)
@@ -102,13 +106,24 @@ int main(int argc, char **argv)
         if (vp_decode_header(buf, r, &hdr) < 0)
             continue;
 
+        int payload_len = hdr.payload_len;
+
+        // Bounds check
+        if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN)
+            continue;
+
+        // Verify checksum
+        uint32_t crc = vp_crc32(buf + hdr.header_len, payload_len);
+        if (crc != hdr.checksum)
+            continue;
+
         if (hdr.type == VP_PKT_DATA) {
             vp_switch_update_client(hdr.client_id, &src, now);
 
-            int payload_len = r - sizeof(vp_header_t);
+            int payload_len = hdr.payload_len;
 
             // Header too small?
-            if (r < sizeof(vp_header_t)) continue;
+            if (r < hdr.header_len) continue;
 
             // invalid or overflow?
             if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN) {
@@ -118,7 +133,7 @@ int main(int argc, char **argv)
 
             vp_switch_handle_frame(
                 hdr.client_id,
-                buf + sizeof(vp_header_t),
+                buf + hdr.header_len,
                 payload_len,
                 now,
                 forward_udp
@@ -140,14 +155,18 @@ int main(int argc, char **argv)
             vp_switch_update_client(new_id, &src, now);
 
             vp_header_t ack = {
-                VP_VERSION,
-                VP_PKT_HELLO_ACK,
-                0,
-                new_id,
-                0
+                .magic = VP_MAGIC,
+                .version = VP_VERSION,
+                .type = VP_PKT_HELLO_ACK,
+                .header_len = sizeof(vp_header_t),
+                .payload_len = 0,
+                .flags = 0,
+                .client_id = new_id,
+                .seq = 0,
+                .checksum = 0
             };
 
-            vp_os_udp_send(g_sock, &src, (uint8_t*)&ack, sizeof(ack));
+            vp_os_udp_send(g_sock, &src, (uint8_t*)&ack, sizeof(vp_header_t));
             continue;
         }
     }
