@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../include/vp_types.h"
+#include "../include/os_net.h"
 
 struct vp_os_addr; // forward declaration
 
