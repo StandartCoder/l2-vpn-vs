@@ -2,6 +2,7 @@
 #include "../include/os_net.h"
 #include "../os/linux/os_linux_common.h"
 #include "../core/protocol.h"
+#include "../include/vp_types.h"
 #include <stdio.h>
 #include <arpa/inet.h>
 #include <string.h>
@@ -33,6 +34,71 @@ static void handle_sigint(int sig)
     exit(0);
 }
 
+static int vp_do_handshake(struct vp_os_socket *sock,
+                           struct vp_os_addr *srv,
+                           uint64_t *last_recv,
+                           uint64_t *last_activity,
+                           uint64_t *last_keepalive,
+                           uint64_t *last_hello,
+                           int is_reconnect)
+{
+    uint64_t now = vp_os_linux_get_time_ms();
+
+    vp_header_t hello = {
+        .magic      = VP_MAGIC,
+        .version    = VP_VERSION,
+        .type       = VP_PKT_HELLO,
+        .header_len = sizeof(vp_header_t),
+        .payload_len= 0,
+        .flags      = 0,
+        .client_id  = 0,   // clientid=0 for new id
+        .seq        = 0,
+        .checksum   = 0
+    };
+
+    if (is_reconnect) {
+        printf("[vportd] Re-HELLO → requesting new client_id\n");
+    } else {
+        printf("[vportd] Initial HELLO → requesting client_id\n");
+    }
+
+    vp_os_udp_send(sock, srv, (uint8_t*)&hello, sizeof(vp_header_t));
+    *last_hello = now;
+
+    uint64_t deadline = now + 3000; // 3s Timeout for HELLO_ACK
+
+    while (g_running && vp_os_linux_get_time_ms() < deadline) {
+        struct vp_os_addr src;
+        uint8_t buf[256];
+
+        int r = vp_os_udp_recv(sock, &src, buf, sizeof(buf));
+        if (r <= 0) {
+            usleep(1000);
+            continue;
+        }
+
+        vp_header_t hdr;
+        if (vp_decode_header(buf, r, &hdr) < 0)
+            continue;
+
+        if (hdr.type == VP_PKT_HELLO_ACK) {
+            g_client_id = hdr.client_id;
+            printf("[vportd] %s client_id = %u\n",
+                   is_reconnect ? "Re-assigned" : "Assigned",
+                   g_client_id);
+
+            uint64_t t = vp_os_linux_get_time_ms();
+            *last_recv      = t;
+            *last_activity  = t;
+            *last_keepalive = t;
+            return 0;
+        }
+    }
+
+    printf("[vportd] HELLO handshake failed (no HELLO_ACK)\n");
+    return -1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 4) {
@@ -43,8 +109,8 @@ int main(int argc, char **argv)
     signal(SIGINT, handle_sigint);
 
     const char *server_ip = argv[1];
-    uint16_t sport_be = htons(atoi(argv[2]));
-    const char *tapname = argv[3];
+    uint16_t sport_be     = htons(atoi(argv[2]));
+    const char *tapname   = argv[3];
 
     struct vp_os_tap *tap;
     struct vp_os_socket *sock;
@@ -60,50 +126,34 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    g_tap = tap;
+    g_tap  = tap;
     g_sock = sock;
 
     printf("[vportd] TAP: %s\n", tapname);
-
-    vp_header_t hello = {
-        .magic = VP_MAGIC,
-        .version = VP_VERSION,
-        .type = VP_PKT_HELLO,
-        .header_len = sizeof(vp_header_t),
-        .payload_len = 0,
-        .flags = 0,
-        .client_id = 0, // clientid=0 for id request
-        .seq = 0,
-        .checksum = 0
-    };
-
-    vp_os_udp_send(sock, &srv, (uint8_t*)&hello, sizeof(vp_header_t));
-
-    while (g_client_id == 0) {
-        struct vp_os_addr src;
-        uint8_t buf[256];
-
-        int r = vp_os_udp_recv(sock, &src, buf, sizeof(buf));
-        if (r <= 0) continue;
-
-        vp_header_t hdr;
-        if (vp_decode_header(buf, r, &hdr) < 0) continue;
-
-        if (hdr.type == VP_PKT_HELLO_ACK) {
-            g_client_id = hdr.client_id;
-            printf("[vportd] Assigned client_id = %u\n", g_client_id);
-        }
-    }
 
     uint8_t frame[2000];
     uint8_t pkt[2000 + sizeof(vp_header_t)];
 
     uint64_t last_keepalive = 0;
-    uint64_t last_activity = 0;
-    uint64_t last_recv = 0;
+    uint64_t last_activity  = 0;
+    uint64_t last_recv      = 0;
+    uint64_t last_hello     = 0;
 
-    int keepalive_interval = 5000;
-    int keepalive_success = 0;
+    int keepalive_interval  = 5000;
+    int keepalive_success   = 0;
+
+    // -------------------------------
+    // INITIAL HELLO HANDSHAKE
+    // -------------------------------
+    if (vp_do_handshake(sock, &srv,
+                        &last_recv,
+                        &last_activity,
+                        &last_keepalive,
+                        &last_hello,
+                        0) < 0) {
+        // comepletely failed → exit
+        return 1;
+    }
 
     while (g_running) {
 
@@ -113,38 +163,39 @@ int main(int argc, char **argv)
         // 1) ADAPTIVE KEEPALIVE LOGIC
         // -------------------------------
 
-        // Increase interval if we managed 3 successful cycles
+        // interval gets increased after 3 successful keepalives
         if (keepalive_success >= 3 && keepalive_interval != 10000) {
             keepalive_interval = 10000;
             printf("[vportd] Keepalive raised to 10s\n");
         }
 
-        // If no incoming/outgoing traffic in 20 seconds → drop back to 5s
+        // If no traffic for 20s → back to 5s
         if (now - last_activity > 20000 && keepalive_interval != 5000) {
             keepalive_interval = 5000;
             keepalive_success = 0;
             printf("[vportd] Keepalive dropped to 5s (idle)\n");
         }
 
-        // Send keepalive if needed
-        if (now - last_keepalive >= (uint64_t)keepalive_interval) {
+        // Send keepalive?
+        if (now - last_keepalive >= (uint64_t)keepalive_interval &&
+            g_client_id != 0)
+        {
             vp_header_t keep = {
-                .magic = VP_MAGIC,
-                .version = VP_VERSION,
-                .type = VP_PKT_KEEPALIVE,
+                .magic      = VP_MAGIC,
+                .version    = VP_VERSION,
+                .type       = VP_PKT_KEEPALIVE,
                 .header_len = sizeof(vp_header_t),
-                .payload_len = 0,
-                .flags = 0,
-                .client_id = g_client_id,
-                .seq = g_seq++,
-                .checksum = 0
+                .payload_len= 0,
+                .flags      = 0,
+                .client_id  = g_client_id,
+                .seq        = g_seq++,
+                .checksum   = 0
             };
             vp_os_udp_send(sock, &srv, (uint8_t*)&keep, sizeof(vp_header_t));
 
             last_keepalive = now;
-            keepalive_success++;   // count each successful send
+            keepalive_success++;
         }
-
 
         // -------------------------------
         // 2) UDP RECEIVE PATH
@@ -154,14 +205,15 @@ int main(int argc, char **argv)
 
         int u;
         while ((u = vp_os_udp_recv(sock, &src, buf, sizeof(buf))) > 0) {
-            last_recv = now; // network activity
+            last_recv = now; // something from the server
 
             vp_header_t hdr;
-            if (u < sizeof(vp_header_t)) continue; // too small → invalid
+            if (u < (int)sizeof(vp_header_t)) continue; // too small
 
-            if (vp_decode_header(buf, u, &hdr) >= 0 &&
-                hdr.type == VP_PKT_DATA)
-            {
+            if (vp_decode_header(buf, u, &hdr) < 0)
+                continue;
+
+            if (hdr.type == VP_PKT_DATA) {
                 int payload_len = hdr.payload_len;
 
                 // Bounds
@@ -173,18 +225,28 @@ int main(int argc, char **argv)
                 if (crc != hdr.checksum)
                     continue;
 
-                last_activity = now; // valid data → activity
+                last_activity = now; // real data
 
                 vp_os_tap_write(tap, buf + hdr.header_len, payload_len);
             }
-        }
 
+            if (hdr.type == VP_PKT_ERROR) {
+                // later: evaluate proper error codes
+                printf("[vportd] Received ERROR packet (type=%u)\n", hdr.type);
+            }
+        }
 
         // -------------------------------
         // 3) TAP FRAME SEND PATH
         // -------------------------------
         int r;
         while ((r = vp_os_tap_read(tap, frame, sizeof(frame))) > 0) {
+
+            if (g_client_id == 0) {
+                // we are currently "disconnected" → drop TAP frames
+                printf("[vportd] Drop TAP frame (no valid client_id)\n");
+                continue;
+            }
 
             // --- BOUNDS CHECK: DROP ILLEGAL FRAMES ---
             if (r > VP_MAX_FRAME_LEN) {
@@ -193,24 +255,61 @@ int main(int argc, char **argv)
             }
 
             vp_header_t hdr = {
-                .magic = VP_MAGIC,
-                .version = VP_VERSION,
-                .type = VP_PKT_DATA,
+                .magic      = VP_MAGIC,
+                .version    = VP_VERSION,
+                .type       = VP_PKT_DATA,
                 .header_len = sizeof(vp_header_t),
-                .payload_len = r, // r = TAP bytes
-                .flags = 0,
-                .client_id = g_client_id,   // LOCAL CLIENT
-                .seq = g_seq++,
-                .checksum = vp_crc32(frame, r)
+                .payload_len= r,
+                .flags      = 0,
+                .client_id  = g_client_id,
+                .seq        = g_seq++,
+                .checksum   = vp_crc32(frame, r)
             };
 
             int total = vp_encode_packet(pkt, sizeof(pkt), &hdr, frame);
+            if (total < 0)
+                continue;
+
             vp_os_udp_send(sock, &srv, pkt, total);
 
-            last_activity = now; // outgoing data → activity
+            last_activity = now;
+        }
+
+        // -------------------------------
+        // 4) DETECT STALE CLIENT → RE-HELLO
+        // -------------------------------
+        // switch_core removes client_table after VP_MAC_TIMEOUT_MS ms.
+        // If we haven't seen anything from the server for a while and the last HELLO
+        // is also old → we assume our client_id is dead.
+        if (g_client_id != 0) {
+            uint64_t since_recv  = now - last_recv;
+            uint64_t since_hello = now - last_hello;
+
+            if (since_recv > VP_MAC_TIMEOUT_MS &&
+                since_hello > VP_MAC_TIMEOUT_MS)
+            {
+                printf("[vportd] No traffic from switch for %llu ms → "
+                       "assuming client_id stale, re-HELLO\n",
+                       (unsigned long long)since_recv);
+
+                g_client_id = 0;
+                g_seq = 1;
+
+                if (vp_do_handshake(sock, &srv,
+                                    &last_recv,
+                                    &last_activity,
+                                    &last_keepalive,
+                                    &last_hello,
+                                    1) < 0) {
+                    // Handshake failed → short pause, then try again
+                    usleep(500 * 1000);
+                }
+            }
         }
 
         // CPU relief
         usleep(1000);
     }
+
+    return 0;
 }
