@@ -51,6 +51,8 @@ static void forward_udp(uint32_t src_client_id,
     };
 
     int total = vp_encode_packet(pkt, sizeof(pkt), &hdr, frame);
+    if (total < 0) return;
+    
     vp_os_udp_send(g_sock, &dst, pkt, total);
 }
 
