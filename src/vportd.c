@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <arpa/inet.h>
 
+static uint32_t g_client_id = 0;
+
 int main(int argc, char **argv)
 {
     if (argc != 4) {
@@ -31,21 +33,49 @@ int main(int argc, char **argv)
 
     printf("[vportd] TAP: %s\n", tapname);
 
-    vp_header_t hello = { VP_VERSION, VP_PKT_HELLO, 0, 1, 0 };
+    vp_header_t hello = { VP_VERSION, VP_PKT_HELLO, 0, 0, 0 }; // client_id=0 for id request
     vp_os_udp_send(sock, &srv, (uint8_t*)&hello, sizeof(hello));
+
+    while (g_client_id == 0) {
+        struct vp_os_addr src;
+        uint8_t buf[256];
+
+        int r = vp_os_udp_recv(sock, &src, buf, sizeof(buf));
+        if (r <= 0) continue;
+
+        vp_header_t hdr;
+        if (vp_decode_header(buf, r, &hdr) < 0) continue;
+
+        if (hdr.type == VP_PKT_HELLO_ACK) {
+            g_client_id = hdr.client_id;
+            printf("[vportd] Assigned client_id = %u\n", g_client_id);
+        }
+    }
 
     uint8_t frame[2000];
     uint8_t pkt[2000 + sizeof(vp_header_t)];
 
     while (1) {
-        int r = vp_os_tap_read(tap, frame, sizeof(frame));
-        if (r > 0) {
-            vp_header_t h = { VP_VERSION, VP_PKT_DATA, 0, 1, 0 }; // client_id=1 (temporary)
+    // TAP
+    int r = vp_os_tap_read(tap, frame, sizeof(frame));
+    if (r > 0) {
+        vp_header_t h = { VP_VERSION, VP_PKT_DATA, 0, g_client_id, 0 };
+        int hdr_len = vp_encode_header(pkt, sizeof(pkt), &h);
+        memcpy(pkt + hdr_len, frame, r);
+        vp_os_udp_send(sock, &srv, pkt, hdr_len + r);
+    }
 
-            int hdr_len = vp_encode_header(pkt, sizeof(pkt), &h);
-            memcpy(pkt + hdr_len, frame, r);
-
-            vp_os_udp_send(sock, &srv, pkt, hdr_len + r);
+    // UDP
+    struct vp_os_addr src;
+    uint8_t buf[2000];
+    int u = vp_os_udp_recv(sock, &src, buf, sizeof(buf));
+    if (u > 0) {
+        vp_header_t hdr;
+        if (vp_decode_header(buf, u, &hdr) >= 0 && hdr.type == VP_PKT_DATA) {
+            vp_os_tap_write(tap,
+                            buf + sizeof(vp_header_t),
+                            u - sizeof(vp_header_t));
         }
     }
+}
 }

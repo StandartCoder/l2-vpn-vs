@@ -2,12 +2,6 @@
 #include "../../include/os_tap.h"
 
 #include <stdlib.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <string.h>
-#include <sys/ioctl.h>
-#include <linux/if.h>
-#include <linux/if_tun.h>
 
 struct vp_os_tap {
     int fd;
@@ -16,7 +10,7 @@ struct vp_os_tap {
 
 int vp_os_tap_open(struct vp_os_tap **tap, const char *hint)
 {
-    int fd = open("/dev/net/tun", O_RDWR);
+    int fd = open(VP_LINUX_TAP_PATH, O_RDWR);
     if (fd < 0)
         return -1;
 

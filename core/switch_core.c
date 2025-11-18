@@ -51,6 +51,7 @@ static int mac_equal(const vp_mac_t *a, const vp_mac_t *b)
 void vp_switch_init(void)
 {
     memset(mac_table, 0, sizeof(mac_table));
+    memset(client_table, 0, sizeof(client_table));
 }
 
 static int mac_lookup(const vp_mac_t *mac)
@@ -75,7 +76,9 @@ void vp_switch_handle_frame(
     uint32_t src_client_id,
     const uint8_t *frame,
     size_t frame_len,
-    vp_forward_cb forwarder)
+    uint64_t now_ms,
+    vp_forward_cb forwarder
+)
 {
     if (frame_len < 14)
         return;
@@ -91,10 +94,12 @@ void vp_switch_handle_frame(
         if (src_idx >= 0) {
             mac_table[src_idx].mac = src;
             mac_table[src_idx].client_id = src_client_id;
+            mac_table[src_idx].last_seen_ms = now_ms;
             mac_table[src_idx].in_use = 1;
         }
     } else {
         mac_table[src_idx].client_id = src_client_id;
+        mac_table[src_idx].last_seen_ms = now_ms;
     }
 
     // 2. Forwarding
@@ -117,10 +122,29 @@ void vp_switch_handle_frame(
 
             uint32_t cid = mac_table[i].client_id;
             if (cid != src_client_id)
-                forwarder(cid, frame, frame_len);
+                forwarder(src_client_id, cid, frame, frame_len);
         }
     } else {
         uint32_t target = mac_table[dst_idx].client_id;
-        forwarder(target, frame, frame_len);
+        forwarder(src_client_id, target, frame, frame_len);
+    }
+}
+
+void vp_switch_flush_stale(uint64_t now_ms)
+{
+    for (int i = 0; i < VP_MAX_CLIENTS; i++) {
+        if (!mac_table[i].in_use) continue;
+
+        if (now_ms - mac_table[i].last_seen_ms > VP_MAC_TIMEOUT_MS) {
+            mac_table[i].in_use = 0;
+        }
+    }
+
+    for (int i = 0; i < VP_MAX_CLIENTS; i++) {
+        if (!client_table[i].in_use) continue;
+
+        if (now_ms - client_table[i].last_seen_ms > VP_MAC_TIMEOUT_MS) {
+            client_table[i].in_use = 0;
+        }
     }
 }

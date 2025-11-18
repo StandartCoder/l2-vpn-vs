@@ -23,6 +23,7 @@ int vp_switch_get_client_addr(uint32_t client_id,
 
 // Callback used by switch_core to forward frames
 typedef void (*vp_forward_cb)(
+    uint32_t src_client_id,
     uint32_t dst_client_id,
     const uint8_t *frame,
     size_t len
@@ -44,6 +45,7 @@ void vp_switch_handle_frame(
     uint32_t src_client_id,
     const uint8_t *frame,
     size_t frame_len,
+    uint64_t now_ms,
     vp_forward_cb forwarder
 );
 
