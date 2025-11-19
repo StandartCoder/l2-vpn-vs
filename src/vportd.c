@@ -3,6 +3,7 @@
 #include "../os/linux/os_linux_common.h"
 #include "../core/protocol.h"
 #include "../include/vp_types.h"
+#include "../include/vp_debug.h"
 #include <stdio.h>
 #include <arpa/inet.h>
 #include <string.h>
@@ -108,6 +109,8 @@ static int vp_do_handshake(struct vp_os_socket *sock,
 
 int main(int argc, char **argv)
 {
+    vp_log_init_from_env();
+
     if (argc != 4) {
         printf("Usage: vportd <server_ip> <server_port> <tapname>\n");
         return 1;
@@ -124,11 +127,13 @@ int main(int argc, char **argv)
     struct vp_os_addr srv = { inet_addr(server_ip), sport_be };
 
     if (vp_os_tap_open(&tap, tapname) < 0) {
+        VP_LOG(VP_LOG_LEVEL_ERROR, "vportd", "Failed to open TAP %s", tapname);
         printf("Failed to open TAP\n");
         return 1;
     }
 
     if (vp_os_udp_open(&sock, htonl(INADDR_ANY), 0) < 0) {
+        VP_LOG(VP_LOG_LEVEL_ERROR, "vportd", "Failed to open UDP socket");
         printf("Failed to open UDP socket\n");
         return 1;
     }
@@ -137,6 +142,7 @@ int main(int argc, char **argv)
     g_sock = sock;
 
     printf("[vportd] TAP: %s\n", tapname);
+    VP_LOG(VP_LOG_LEVEL_INFO, "vportd", "Using TAP: %s", tapname);
 
     uint8_t frame[2000];
     uint8_t pkt[2000 + VP_HEADER_WIRE_LEN];

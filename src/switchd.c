@@ -3,6 +3,7 @@
 #include "../include/os_net.h"
 #include "../core/protocol.h"
 #include "../include/vp_types.h"
+#include "../include/vp_debug.h"
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <string.h>
@@ -140,6 +141,8 @@ static uint32_t vp_alloc_client_id(void)
 
 int main(int argc, char **argv)
 {
+    vp_log_init_from_env();
+
     if (argc != 2) {
         printf("Usage: switchd <port>\n");
         return 1;
@@ -151,6 +154,7 @@ int main(int argc, char **argv)
 
     struct vp_os_socket *sock;
     if (vp_os_udp_open(&sock, htonl(INADDR_ANY), port_be) < 0) {
+        VP_LOG(VP_LOG_LEVEL_ERROR, "switchd", "Failed to bind UDP port");
         printf("Failed to bind port\n");
         return 1;
     }
@@ -163,38 +167,53 @@ int main(int argc, char **argv)
     struct vp_os_addr src;
 
     printf("[switchd] Listening on UDP port %d\n", ntohs(port_be));
+    VP_LOG(VP_LOG_LEVEL_INFO, "switchd", "Listening on UDP port %d", ntohs(port_be));
 
     while (g_running) {
         uint64_t now = vp_os_linux_get_time_ms();
         vp_switch_flush_stale(now);
 
         int r = vp_os_udp_recv(sock, &src, buf, sizeof(buf));
-        if (r < 0) continue;
+        if (r < 0) {
+            continue;
+        }
 
         vp_header_t hdr;
-        if (vp_decode_header(buf, r, &hdr) < 0)
+        if (vp_decode_header(buf, r, &hdr) < 0) {
+            VP_LOG(VP_LOG_LEVEL_DEBUG, "switchd", "Drop: invalid header (len=%d)", r);
             continue;
+        }
 
         int payload_len = hdr.payload_len;
         size_t header_len = hdr.header_len;
 
         // Bounds check
-        if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN)
+        if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN) {
+            VP_LOG(VP_LOG_LEVEL_DEBUG, "switchd", "Drop: invalid payload_len=%d", payload_len);
             continue;
+        }
 
         // Full packet bounds check: header + payload must fit into r
-        if (header_len + (size_t)payload_len > (size_t)r)
+        if (header_len + (size_t)payload_len > (size_t)r) {
+            VP_LOG(VP_LOG_LEVEL_DEBUG, "switchd",
+                   "Drop: header_len(%zu)+payload_len(%d) > packet_len(%d)",
+                   header_len, payload_len, r);
             continue;
+        }
 
         // Verify checksum
         uint32_t crc = vp_crc32(buf + hdr.header_len, payload_len);
-        if (crc != hdr.checksum)
+        if (crc != hdr.checksum) {
+            VP_LOG(VP_LOG_LEVEL_DEBUG, "switchd", "Drop: checksum mismatch");
             continue;
+        }
 
         if (hdr.type == VP_PKT_DATA) {
             uint32_t src_client_id;
-            if (vp_switch_get_client_id_for_addr(&src, &src_client_id) < 0)
+            if (vp_switch_get_client_id_for_addr(&src, &src_client_id) < 0) {
+                VP_LOG(VP_LOG_LEVEL_DEBUG, "switchd", "Drop DATA: unknown client addr");
                 continue;
+            }
 
             vp_switch_update_client(src_client_id, &src, now);
 
@@ -203,6 +222,7 @@ int main(int argc, char **argv)
             // invalid or overflow?
             if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN) {
                 printf("[switchd] Drop bad frame: size=%d\n", payload_len);
+                VP_LOG(VP_LOG_LEVEL_DEBUG, "switchd", "Drop DATA: bad size=%d", payload_len);
                 continue;
             }
 
