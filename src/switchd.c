@@ -93,15 +93,8 @@ static int vp_tx_rate_allow(uint32_t client_id, uint64_t now_ms)
 
 static void handle_sigint(int sig)
 {
-    printf("\n[switchd] Caught SIGINT, shutting down...\n");
+    (void)sig;
     g_running = 0;
-
-    if (g_sock) {
-        vp_os_udp_close(g_sock);
-        printf("[switchd] UDP socket closed\n");
-    }
-
-    exit(0);
 }
 
 static void forward_udp(uint32_t src_client_id,
@@ -134,18 +127,26 @@ static void forward_udp(uint32_t src_client_id,
     };
 
     int total = vp_encode_packet(pkt, sizeof(pkt), &hdr, frame);
-    if (total < 0) return;
-    
-    vp_os_udp_send(g_sock, &dst, pkt, total);
+    if (total < 0)
+        return;
+
+    if (vp_os_udp_send(g_sock, &dst, pkt, (size_t)total) < 0) {
+        LOG_WARN("UDP send to client_id=%u failed", dst_client_id);
+    }
 }
 
 static uint32_t vp_alloc_client_id(void)
 {
     static uint32_t next_id = 1;
 
-    while (next_id < VP_MAX_CLIENTS) {
+    // Perform a bounded circular search over the valid client_id range
+    // [1, VP_MAX_CLIENTS-1]. If all slots are in use, return 0.
+    for (uint32_t attempts = 0; attempts < (uint32_t)(VP_MAX_CLIENTS - 1); attempts++) {
+        if (next_id >= VP_MAX_CLIENTS)
+            next_id = 1;
+
         uint32_t id = next_id++;
-        // check unused:
+
         struct vp_os_addr tmp;
         if (vp_switch_get_client_addr(id, &tmp) < 0)
             return id;
@@ -233,6 +234,25 @@ int main(int argc, char **argv)
             uint32_t src_client_id;
             if (vp_switch_get_client_id_for_addr(&src, &src_client_id) < 0) {
                 LOG_DEBUG("Drop DATA: unknown client addr");
+                // Inform client so it can re-HELLO after switch restart.
+                vp_header_t err = {
+                    .magic      = VP_MAGIC,
+                    .version    = VP_VERSION,
+                    .type       = VP_PKT_ERROR,
+                    .header_len = VP_HEADER_WIRE_LEN,
+                    .payload_len= 0,
+                    .flags      = 0,
+                    .client_id  = 0,
+                    .seq        = 0,
+                    .checksum   = 0
+                };
+
+                uint8_t epkt[VP_HEADER_WIRE_LEN];
+                int elen = vp_encode_packet(epkt, sizeof(epkt), &err, NULL);
+                if (elen > 0) {
+                    if (vp_os_udp_send(g_sock, &src, epkt, (size_t)elen) < 0)
+                        LOG_WARN("UDP send of ERROR (DATA unknown) failed");
+                }
                 continue;
             }
 
@@ -264,8 +284,28 @@ int main(int argc, char **argv)
 
         if (hdr.type == VP_PKT_KEEPALIVE) {
             uint32_t src_client_id;
-            if (vp_switch_get_client_id_for_addr(&src, &src_client_id) < 0)
+            if (vp_switch_get_client_id_for_addr(&src, &src_client_id) < 0) {
+                // Unknown address sending KEEPALIVE → tell client to re-HELLO.
+                vp_header_t err = {
+                    .magic      = VP_MAGIC,
+                    .version    = VP_VERSION,
+                    .type       = VP_PKT_ERROR,
+                    .header_len = VP_HEADER_WIRE_LEN,
+                    .payload_len= 0,
+                    .flags      = 0,
+                    .client_id  = 0,
+                    .seq        = 0,
+                    .checksum   = 0
+                };
+
+                uint8_t epkt[VP_HEADER_WIRE_LEN];
+                int elen = vp_encode_packet(epkt, sizeof(epkt), &err, NULL);
+                if (elen > 0) {
+                    if (vp_os_udp_send(g_sock, &src, epkt, (size_t)elen) < 0)
+                        LOG_WARN("UDP send of ERROR (KEEPALIVE unknown) failed");
+                }
                 continue;
+            }
 
             if (vp_switch_check_replay(src_client_id, hdr.seq) < 0) {
                 LOG_DEBUG("Drop KEEPALIVE: replay or out-of-window (seq=%u)", hdr.seq);
@@ -293,16 +333,23 @@ int main(int argc, char **argv)
                 .payload_len = 0,
                 .flags = 0,
                 .client_id = new_id,
-                .seq = 0,
+                .seq = hdr.seq,
                 .checksum = 0
             };
 
             uint8_t pkt[VP_HEADER_WIRE_LEN];
             int ack_len = vp_encode_packet(pkt, sizeof(pkt), &ack, NULL);
-            if (ack_len > 0)
-                vp_os_udp_send(g_sock, &src, pkt, (size_t)ack_len);
+            if (ack_len > 0) {
+                if (vp_os_udp_send(g_sock, &src, pkt, (size_t)ack_len) < 0)
+                    LOG_WARN("UDP send of HELLO_ACK failed");
+            }
             continue;
         }
+    }
+
+    if (g_sock) {
+        vp_os_udp_close(g_sock);
+        printf("[switchd] UDP socket closed\n");
     }
 
     return 0;

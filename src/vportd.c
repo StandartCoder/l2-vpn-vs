@@ -70,20 +70,8 @@ static int vp_check_replay_from_switch(uint32_t seq)
 
 static void handle_sigint(int sig)
 {
-    printf("\n[vportd] Caught SIGINT, shutting down...\n");
+    (void)sig;
     g_running = 0;
-
-    if (g_tap) {
-        vp_os_tap_close(g_tap);
-        printf("[vportd] TAP closed\n");
-    }
-
-    if (g_sock) {
-        vp_os_udp_close(g_sock);
-        printf("[vportd] UDP socket closed\n");
-    }
-
-    exit(0);
 }
 
 static int vp_do_handshake(struct vp_os_socket *sock,
@@ -96,6 +84,12 @@ static int vp_do_handshake(struct vp_os_socket *sock,
 {
     uint64_t now = vp_os_linux_get_time_ms();
 
+    // Use a per-handshake nonce in seq to bind HELLO_ACKs
+    // to the corresponding HELLO and prevent replay of old ACKs.
+    uint32_t hello_seq = (uint32_t)now;
+    if (hello_seq == 0)
+        hello_seq = 1;
+
     vp_header_t hello = {
         .magic      = VP_MAGIC,
         .version    = VP_VERSION,
@@ -104,7 +98,7 @@ static int vp_do_handshake(struct vp_os_socket *sock,
         .payload_len= 0,
         .flags      = 0,
         .client_id  = 0,   // client_id never sent by client
-        .seq        = 0,
+        .seq        = hello_seq,
         .checksum   = 0
     };
 
@@ -121,7 +115,10 @@ static int vp_do_handshake(struct vp_os_socket *sock,
         return -1;
     }
 
-    vp_os_udp_send(sock, srv, hello_pkt, (size_t)hello_len);
+    if (vp_os_udp_send(sock, srv, hello_pkt, (size_t)hello_len) < 0) {
+        LOG_WARN("UDP send HELLO failed");
+        return -1;
+    }
     *last_hello = now;
 
     uint64_t deadline = now + 3000; // 3s Timeout for HELLO_ACK
@@ -141,6 +138,11 @@ static int vp_do_handshake(struct vp_os_socket *sock,
             continue;
 
         if (hdr.type == VP_PKT_HELLO_ACK) {
+            // Ignore stray or replayed ACKs for other sessions
+            // by checking the handshake nonce.
+            if (hdr.seq != hello_seq)
+                continue;
+
             g_client_id = hdr.client_id;
             printf("[vportd] %s client_id = %u\n",
                    is_reconnect ? "Re-assigned" : "Assigned",
@@ -150,6 +152,8 @@ static int vp_do_handshake(struct vp_os_socket *sock,
             *last_recv      = t;
             *last_activity  = t;
             *last_keepalive = t;
+            g_rx_highest_seq = 0;
+            g_rx_replay_window = 0;
             return 0;
         }
     }
@@ -257,8 +261,10 @@ int main(int argc, char **argv)
             };
 
             int keep_len = vp_encode_packet(pkt, sizeof(pkt), &keep, NULL);
-            if (keep_len > 0)
-                vp_os_udp_send(sock, &srv, pkt, (size_t)keep_len);
+            if (keep_len > 0) {
+                if (vp_os_udp_send(sock, &srv, pkt, (size_t)keep_len) < 0)
+                    LOG_WARN("UDP send KEEPALIVE failed");
+            }
 
             last_keepalive = now;
             keepalive_success++;
@@ -271,7 +277,14 @@ int main(int argc, char **argv)
         uint8_t buf[2000];
 
         int u;
-        while ((u = vp_os_udp_recv(sock, &src, buf, sizeof(buf))) > 0) {
+        while (1) {
+            u = vp_os_udp_recv(sock, &src, buf, sizeof(buf));
+            if (u <= 0) {
+                if (u < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    LOG_WARN("UDP recv error from switch (errno=%d)", errno);
+                }
+                break;
+            }
             last_recv = now; // something from the server
 
             vp_header_t hdr;
@@ -307,7 +320,8 @@ int main(int argc, char **argv)
                 LOG_TRACE("RX DATA from switch len=%d", payload_len);
                 LOG_HEXDUMP_TRACE("RX payload", buf + hdr.header_len, (size_t)payload_len);
 
-                vp_os_tap_write(tap, buf + hdr.header_len, payload_len);
+                if (vp_os_tap_write(tap, buf + hdr.header_len, payload_len) < 0)
+                    LOG_WARN("TAP write failed (len=%d)", payload_len);
             }
 
             if (hdr.type == VP_PKT_ERROR) {
@@ -370,13 +384,24 @@ int main(int argc, char **argv)
             LOG_TRACE("TX DATA to switch len=%d", r);
             LOG_HEXDUMP_TRACE("TX payload", frame, (size_t)r);
 
-            vp_os_udp_send(sock, &srv, pkt, total);
+            if (vp_os_udp_send(sock, &srv, pkt, (size_t)total) < 0)
+                LOG_WARN("UDP send DATA to switch failed");
 
             last_activity = now;
         }
 
         // CPU relief
         usleep(1000);
+    }
+
+    if (g_tap) {
+        vp_os_tap_close(g_tap);
+        printf("[vportd] TAP closed\n");
+    }
+
+    if (g_sock) {
+        vp_os_udp_close(g_sock);
+        printf("[vportd] UDP socket closed\n");
     }
 
     return 0;

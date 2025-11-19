@@ -33,7 +33,17 @@ int vp_os_udp_open(struct vp_os_socket **sock,
     }
 
     int flags = fcntl(s->fd, F_GETFL, 0);
-    fcntl(s->fd, F_SETFL, flags | O_NONBLOCK);
+    if (flags < 0) {
+        close(s->fd);
+        free(s);
+        return -1;
+    }
+
+    if (fcntl(s->fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(s->fd);
+        free(s);
+        return -1;
+    }
 
     *sock = s;
     return 0;

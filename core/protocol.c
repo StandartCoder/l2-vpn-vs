@@ -65,9 +65,9 @@ static uint8_t g_vp_psk[16];
 static int g_vp_psk_loaded = 0;
 
 // Derive a 128-bit key from an arbitrary-length passphrase using
-// SipHash-based KDF with fixed public seeds and many iterations.
-// This is NOT a replacement for a modern password hash, but it
-// significantly raises the cost of offline guessing compared to
+// a SipHash-based KDF with both CPU and memory cost. This is still
+// much simpler than a modern password hash (Argon2/scrypt), but it
+// makes naive offline guessing significantly more expensive than
 // using the raw passphrase bytes directly.
 static void vp_kdf_from_psk(const char *pass, size_t pass_len, uint8_t out_key[16])
 {
@@ -86,21 +86,67 @@ static void vp_kdf_from_psk(const char *pass, size_t pass_len, uint8_t out_key[1
     uint64_t left  = vp_siphash24(seed1, p, pass_len);
     uint64_t right = vp_siphash24(seed2, p, pass_len);
 
-    // Iterative strengthening: repeatedly fold lanes back through SipHash
-    // to make each candidate guess more expensive to evaluate.
-    const int rounds = 4096;
-    uint8_t buf[8];
+    // Memory-hard strengthening:
+    // Use a modest buffer (256 KiB) of 64-bit words and perform a
+    // data-dependent walk over it. This raises the cost of parallel
+    // brute-force (especially on GPUs/ASICs) compared to a purely
+    // CPU-bound KDF.
+    enum { VP_KDF_MEM_WORDS = 32768 }; // 32768 * 8 = 256 KiB
+    uint64_t *mem = (uint64_t *)malloc(VP_KDF_MEM_WORDS * sizeof(uint64_t));
 
-    for (int i = 0; i < rounds; i++) {
-        // Mix 'left'
-        for (int j = 0; j < 8; j++)
-            buf[j] = (uint8_t)(left >> (8 * j));
-        left = vp_siphash24(seed1, buf, sizeof(buf));
+    if (mem) {
+        // Fill buffer deterministically from the initial lanes
+        for (size_t i = 0; i < VP_KDF_MEM_WORDS; i++) {
+            uint8_t block[16];
+            uint64_t x = left ^ (uint64_t)i;
+            uint64_t y = right ^ (uint64_t)(VP_KDF_MEM_WORDS - 1 - i);
+            for (int j = 0; j < 8; j++) {
+                block[j]     = (uint8_t)(x >> (8 * j));
+                block[8 + j] = (uint8_t)(y >> (8 * j));
+            }
+            uint64_t a = vp_siphash24(seed1, block, sizeof(block));
+            uint64_t b = vp_siphash24(seed2, block, sizeof(block));
+            mem[i] = a ^ b;
+        }
 
-        // Mix 'right'
-        for (int j = 0; j < 8; j++)
-            buf[j] = (uint8_t)(right >> (8 * j));
-        right = vp_siphash24(seed2, buf, sizeof(buf));
+        // Perform a data-dependent random walk over the buffer
+        const int rounds = 4096;
+        for (int r = 0; r < rounds; r++) {
+            size_t idx = (size_t)((left ^ right ^ (uint64_t)r) & (VP_KDF_MEM_WORDS - 1));
+            uint64_t v = mem[idx];
+
+            uint8_t tmp[8];
+            for (int j = 0; j < 8; j++)
+                tmp[j] = (uint8_t)(v >> (8 * j));
+
+            uint64_t a = vp_siphash24(seed1, tmp, sizeof(tmp));
+            uint64_t b = vp_siphash24(seed2, tmp, sizeof(tmp));
+
+            left  ^= a ^ v;
+            right ^= b ^ mem[(idx ^ (size_t)r) & (VP_KDF_MEM_WORDS - 1)];
+            mem[idx] = left ^ right;
+        }
+
+        // Fold buffer back into the lanes
+        for (size_t i = 0; i < VP_KDF_MEM_WORDS; i += 1024) {
+            left  ^= mem[i];
+            right ^= mem[i + 512];
+        }
+
+        free(mem);
+    } else {
+        // Fallback: purely CPU-bound strengthening if memory allocation fails.
+        const int rounds = 8192;
+        uint8_t buf[8];
+        for (int i = 0; i < rounds; i++) {
+            for (int j = 0; j < 8; j++)
+                buf[j] = (uint8_t)(left >> (8 * j));
+            left = vp_siphash24(seed1, buf, sizeof(buf));
+
+            for (int j = 0; j < 8; j++)
+                buf[j] = (uint8_t)(right >> (8 * j));
+            right = vp_siphash24(seed2, buf, sizeof(buf));
+        }
     }
 
     // Export as 16-byte little-endian key

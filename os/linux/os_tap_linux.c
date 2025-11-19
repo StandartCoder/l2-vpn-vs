@@ -38,6 +38,11 @@ int vp_os_tap_open(struct vp_os_tap **tap, const char *hint)
     }
 
     struct vp_os_tap *t = calloc(1, sizeof(*t));
+    if (!t) {
+        close(fd);
+        return -1;
+    }
+
     t->fd = fd;
     strncpy(t->ifname, ifr.ifr_name, IFNAMSIZ);
 

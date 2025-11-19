@@ -123,11 +123,8 @@ static void client_addr_upsert(const struct vp_os_addr *addr, uint32_t client_id
             return;
         }
     }
-
-    // Bucket full: overwrite first entry (simple fallback)
-    client_addr_table[bucket][0].in_use = 1;
-    client_addr_table[bucket][0].addr = *addr;
-    client_addr_table[bucket][0].client_id = client_id;
+    // Bucket full: keep existing mappings. New mapping will still be
+    // discoverable via fallback scan in vp_switch_get_client_id_for_addr.
 }
 
 static void client_addr_remove(const struct vp_os_addr *addr, uint32_t client_id)
@@ -192,12 +189,34 @@ int vp_switch_get_client_id_for_addr(const struct vp_os_addr *addr,
                                      uint32_t *out_client_id)
 {
     vp_client_addr_entry_t *e = client_addr_find_entry(addr);
-    if (!e || !e->in_use)
-        return -1;
+    if (e && e->in_use) {
+        if (out_client_id)
+            *out_client_id = e->client_id;
+        return 0;
+    }
 
-    if (out_client_id)
-        *out_client_id = e->client_id;
-    return 0;
+    // Fallback: linear scan of client_table to handle hash bucket
+    // saturation or collisions. This keeps semantics correct even
+    // under adversarial address patterns, at the cost of O(N) in
+    // rare cases.
+    for (uint32_t cid = 1; cid < VP_CLIENT_MAX; cid++) {
+        vp_client_entry_t *c = &client_table[cid];
+        if (!c->in_use)
+            continue;
+
+        if (c->addr.ip_be == addr->ip_be &&
+            c->addr.port_be == addr->port_be)
+        {
+            if (out_client_id)
+                *out_client_id = cid;
+
+            // Try to cache this mapping in the hash table for next time.
+            client_addr_upsert(addr, cid);
+            return 0;
+        }
+    }
+
+    return -1;
 }
 
 int vp_switch_check_replay(uint32_t client_id, uint32_t seq)
