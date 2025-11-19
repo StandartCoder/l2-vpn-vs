@@ -57,9 +57,22 @@ ip tuntap add dev tap0 mode tap
 echo "[*] Bringing tap0 up"
 ip link set tap0 up
 
-echo "[*] Setting MTU to 1400 on tap0"
-ip link set dev tap0 mtu 1400
+# ---------------------------
+# Generate random MAC (02:xx:xx:xx:xx:xx)
+# ---------------------------
+mac=$(printf "02:%02x:%02x:%02x:%02x:%02x" \
+    $((RANDOM&0xFF)) \
+    $((RANDOM&0xFF)) \
+    $((RANDOM&0xFF)) \
+    $((RANDOM&0xFF)) \
+    $((RANDOM&0xFF)) )
 
+echo "[*] Assigning random MAC = $mac"
+ip link set dev tap0 address "$mac"
+
+# ---------------------------
+# Assign IP
+# ---------------------------
 echo "[*] Assigning IP $IP/24"
 ip addr add "$IP/24" dev tap0
 
