@@ -2,6 +2,7 @@
 #include "../include/vp_types.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 // --------------------------------------
 // Helpers: fixed-endian I/O
@@ -62,6 +63,52 @@ static uint64_t vp_read_u64_be(const uint8_t *p)
 // --------------------------------------
 static uint8_t g_vp_psk[16];
 static int g_vp_psk_loaded = 0;
+
+// Derive a 128-bit key from an arbitrary-length passphrase using
+// SipHash-based KDF with fixed public seeds and many iterations.
+// This is NOT a replacement for a modern password hash, but it
+// significantly raises the cost of offline guessing compared to
+// using the raw passphrase bytes directly.
+static void vp_kdf_from_psk(const char *pass, size_t pass_len, uint8_t out_key[16])
+{
+    static const uint8_t seed1[16] = {
+        0x4B, 0x44, 0x46, 0x31, 0x21, 0x90, 0xAB, 0xCD,
+        0xEF, 0x01, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA
+    };
+    static const uint8_t seed2[16] = {
+        0x53, 0x45, 0x43, 0x32, 0x42, 0xA1, 0xBC, 0xDE,
+        0xF0, 0x12, 0x23, 0x45, 0x67, 0x89, 0x9A, 0xCB
+    };
+
+    const uint8_t *p = (const uint8_t *)pass;
+
+    // Initial mixing of passphrase into two 64-bit lanes
+    uint64_t left  = vp_siphash24(seed1, p, pass_len);
+    uint64_t right = vp_siphash24(seed2, p, pass_len);
+
+    // Iterative strengthening: repeatedly fold lanes back through SipHash
+    // to make each candidate guess more expensive to evaluate.
+    const int rounds = 4096;
+    uint8_t buf[8];
+
+    for (int i = 0; i < rounds; i++) {
+        // Mix 'left'
+        for (int j = 0; j < 8; j++)
+            buf[j] = (uint8_t)(left >> (8 * j));
+        left = vp_siphash24(seed1, buf, sizeof(buf));
+
+        // Mix 'right'
+        for (int j = 0; j < 8; j++)
+            buf[j] = (uint8_t)(right >> (8 * j));
+        right = vp_siphash24(seed2, buf, sizeof(buf));
+    }
+
+    // Export as 16-byte little-endian key
+    for (int i = 0; i < 8; i++) {
+        out_key[i]      = (uint8_t)(left >> (8 * i));
+        out_key[8 + i]  = (uint8_t)(right >> (8 * i));
+    }
+}
 
 static uint64_t vp_load_u64_le(const uint8_t *p)
 {
@@ -160,21 +207,20 @@ static void vp_auth_load_key(void)
     const char *env = getenv("VP_PSK");
     memset(g_vp_psk, 0, sizeof(g_vp_psk));
 
-    if (env && env[0]) {
-        size_t n = strlen(env);
-        if (n > sizeof(g_vp_psk))
-            n = sizeof(g_vp_psk);
-        memcpy(g_vp_psk, env, n);
-    } else {
-        // Default key (should be overridden in production via VP_PSK).
-        const uint8_t default_key[16] = {
-            0x56, 0x50, 0x4E, 0x32, // "VPN2"
-            0x01, 0x23, 0x45, 0x67,
-            0x89, 0xAB, 0xCD, 0xEF,
-            0x10, 0x32, 0x54, 0x76
-        };
-        memcpy(g_vp_psk, default_key, sizeof(g_vp_psk));
+    if (!env || !env[0]) {
+        fprintf(stderr,
+                "[vpnet] FATAL: VP_PSK environment variable is not set. "
+                "A strong pre-shared key is required for authentication.\n");
+        exit(1);
     }
+
+    // Bound the length we feed into the KDF to avoid pathological env sizes.
+    size_t pass_len = strlen(env);
+    const size_t max_pass_len = 256;
+    if (pass_len > max_pass_len)
+        pass_len = max_pass_len;
+
+    vp_kdf_from_psk(env, pass_len, g_vp_psk);
 }
 
 static void vp_pack_header(uint8_t *buf, const vp_header_t *hdr, uint64_t auth_tag)
