@@ -1,8 +1,6 @@
 #ifndef VP_DEBUG_H
 #define VP_DEBUG_H
 
-#include <stdarg.h>
-
 typedef enum {
     VP_LOG_LEVEL_ERROR = 0,
     VP_LOG_LEVEL_WARN  = 1,
@@ -27,9 +25,19 @@ void vp_log_message(vp_log_level_t level,
                     const char *fmt,
                     ...);
 
+// Hexdump helper
+void vp_log_hexdump(vp_log_level_t level,
+                    const char *component,
+                    const char *func,
+                    const char *prefix,
+                    const unsigned char *data,
+                    unsigned long len);
+
 // Convenience macro capturing function name
 #define VP_LOG(level, component, fmt, ...) \
     vp_log_message((level), (component), __func__, fmt, ##__VA_ARGS__)
 
-#endif
+#define VP_HEXDUMP(level, component, prefix, data, len) \
+    vp_log_hexdump((level), (component), __func__, (prefix), (const unsigned char *)(data), (unsigned long)(len))
 
+#endif

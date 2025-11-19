@@ -10,6 +10,20 @@
 #include <signal.h>
 #include <stdlib.h>
 
+#define VP_COMP "vportd"
+
+#define LOG_ERROR(fmt, ...) VP_LOG(VP_LOG_LEVEL_ERROR, VP_COMP, fmt, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...)  VP_LOG(VP_LOG_LEVEL_WARN,  VP_COMP, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)  VP_LOG(VP_LOG_LEVEL_INFO,  VP_COMP, fmt, ##__VA_ARGS__)
+#define LOG_DEBUG(fmt, ...) VP_LOG(VP_LOG_LEVEL_DEBUG, VP_COMP, fmt, ##__VA_ARGS__)
+#define LOG_TRACE(fmt, ...) VP_LOG(VP_LOG_LEVEL_TRACE, VP_COMP, fmt, ##__VA_ARGS__)
+
+#define LOG_HEXDUMP_DEBUG(prefix, data, len) \
+    VP_HEXDUMP(VP_LOG_LEVEL_DEBUG, VP_COMP, prefix, data, len)
+
+#define LOG_HEXDUMP_TRACE(prefix, data, len) \
+    VP_HEXDUMP(VP_LOG_LEVEL_TRACE, VP_COMP, prefix, data, len)
+
 static struct vp_os_tap *g_tap = NULL;
 static struct vp_os_socket *g_sock = NULL;
 static int g_running = 1;
@@ -127,13 +141,13 @@ int main(int argc, char **argv)
     struct vp_os_addr srv = { inet_addr(server_ip), sport_be };
 
     if (vp_os_tap_open(&tap, tapname) < 0) {
-        VP_LOG(VP_LOG_LEVEL_ERROR, "vportd", "Failed to open TAP %s", tapname);
+        LOG_ERROR("Failed to open TAP %s", tapname);
         printf("Failed to open TAP\n");
         return 1;
     }
 
     if (vp_os_udp_open(&sock, htonl(INADDR_ANY), 0) < 0) {
-        VP_LOG(VP_LOG_LEVEL_ERROR, "vportd", "Failed to open UDP socket");
+        LOG_ERROR("Failed to open UDP socket");
         printf("Failed to open UDP socket\n");
         return 1;
     }
@@ -142,7 +156,7 @@ int main(int argc, char **argv)
     g_sock = sock;
 
     printf("[vportd] TAP: %s\n", tapname);
-    VP_LOG(VP_LOG_LEVEL_INFO, "vportd", "Using TAP: %s", tapname);
+    LOG_INFO("Using TAP: %s", tapname);
 
     uint8_t frame[2000];
     uint8_t pkt[2000 + VP_HEADER_WIRE_LEN];
@@ -248,6 +262,9 @@ int main(int argc, char **argv)
 
                 last_activity = now; // real data
 
+                LOG_TRACE("RX DATA from switch len=%d", payload_len);
+                LOG_HEXDUMP_TRACE("RX payload", buf + hdr.header_len, (size_t)payload_len);
+
                 vp_os_tap_write(tap, buf + hdr.header_len, payload_len);
             }
 
@@ -288,6 +305,7 @@ int main(int argc, char **argv)
             // --- BOUNDS CHECK: DROP ILLEGAL FRAMES ---
             if (r > 1400) {
                 printf("[vportd] Drop TAP frame: too big (%d bytes)\n", r);
+                LOG_DEBUG("Drop TAP frame: too big (%d bytes)", r);
                 continue;
             }
 
@@ -306,6 +324,9 @@ int main(int argc, char **argv)
             int total = vp_encode_packet(pkt, sizeof(pkt), &hdr, frame);
             if (total < 0)
                 continue;
+
+            LOG_TRACE("TX DATA to switch len=%d", r);
+            LOG_HEXDUMP_TRACE("TX payload", frame, (size_t)r);
 
             vp_os_udp_send(sock, &srv, pkt, total);
 
