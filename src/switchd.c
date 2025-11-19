@@ -236,9 +236,12 @@ int main(int argc, char **argv)
                 continue;
             }
 
-            vp_switch_update_client(src_client_id, &src, now);
+            if (vp_switch_check_replay(src_client_id, hdr.seq) < 0) {
+                LOG_DEBUG("Drop DATA: replay or out-of-window (seq=%u)", hdr.seq);
+                continue;
+            }
 
-            int payload_len = hdr.payload_len;
+            vp_switch_update_client(src_client_id, &src, now);
 
             // invalid or overflow?
             if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN) {
@@ -263,6 +266,11 @@ int main(int argc, char **argv)
             uint32_t src_client_id;
             if (vp_switch_get_client_id_for_addr(&src, &src_client_id) < 0)
                 continue;
+
+            if (vp_switch_check_replay(src_client_id, hdr.seq) < 0) {
+                LOG_DEBUG("Drop KEEPALIVE: replay or out-of-window (seq=%u)", hdr.seq);
+                continue;
+            }
 
             vp_switch_update_client(src_client_id, &src, now);
             continue; // no frame forwarding

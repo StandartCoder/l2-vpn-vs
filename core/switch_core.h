@@ -13,6 +13,8 @@ typedef struct {
     uint32_t client_id;
     struct vp_os_addr addr;
     uint64_t last_seen_ms;
+    uint32_t highest_seq;
+    uint64_t replay_window;
 } vp_client_entry_t;
 
 void vp_switch_update_client(uint32_t client_id,
@@ -25,6 +27,10 @@ int vp_switch_get_client_addr(uint32_t client_id,
 // Look up client_id by remote UDP address
 int vp_switch_get_client_id_for_addr(const struct vp_os_addr *addr,
                                      uint32_t *out_client_id);
+
+// Per-client replay protection (DATA / KEEPALIVE)
+// Returns 0 on accept, <0 on replay/too-old/invalid.
+int vp_switch_check_replay(uint32_t client_id, uint32_t seq);
 
 // Callback used by switch_core to forward frames
 typedef void (*vp_forward_cb)(

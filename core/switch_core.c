@@ -164,6 +164,8 @@ void vp_switch_update_client(uint32_t client_id,
     } else {
         e->in_use = 1;
         e->client_id = client_id;
+        e->highest_seq = 0;
+        e->replay_window = 0;
     }
 
     e->addr = *addr;
@@ -195,6 +197,51 @@ int vp_switch_get_client_id_for_addr(const struct vp_os_addr *addr,
 
     if (out_client_id)
         *out_client_id = e->client_id;
+    return 0;
+}
+
+int vp_switch_check_replay(uint32_t client_id, uint32_t seq)
+{
+    if (client_id == 0 || client_id >= VP_CLIENT_MAX)
+        return -1;
+
+    vp_client_entry_t *e = &client_table[client_id];
+    if (!e->in_use)
+        return -1;
+
+    // Sequence numbers start at 1; 0 is reserved for control.
+    if (seq == 0)
+        return -1;
+
+    uint32_t highest = e->highest_seq;
+
+    if (highest == 0) {
+        e->highest_seq = seq;
+        e->replay_window = 1ULL;
+        return 0;
+    }
+
+    if (seq > highest) {
+        uint32_t delta = seq - highest;
+        if (delta >= 64) {
+            e->replay_window = 1ULL;
+        } else {
+            e->replay_window <<= delta;
+            e->replay_window |= 1ULL;
+        }
+        e->highest_seq = seq;
+        return 0;
+    }
+
+    uint32_t diff = highest - seq;
+    if (diff >= 64)
+        return -1;
+
+    uint64_t mask = 1ULL << diff;
+    if (e->replay_window & mask)
+        return -1;
+
+    e->replay_window |= mask;
     return 0;
 }
 

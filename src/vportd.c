@@ -30,6 +30,43 @@ static int g_running = 1;
 
 static uint32_t g_client_id = 0;
 static uint32_t g_seq = 1;
+static uint32_t g_rx_highest_seq = 0;
+static uint64_t g_rx_replay_window = 0;
+
+static int vp_check_replay_from_switch(uint32_t seq)
+{
+    if (seq == 0)
+        return -1;
+
+    if (g_rx_highest_seq == 0) {
+        g_rx_highest_seq = seq;
+        g_rx_replay_window = 1ULL;
+        return 0;
+    }
+
+    if (seq > g_rx_highest_seq) {
+        uint32_t delta = seq - g_rx_highest_seq;
+        if (delta >= 64) {
+            g_rx_replay_window = 1ULL;
+        } else {
+            g_rx_replay_window <<= delta;
+            g_rx_replay_window |= 1ULL;
+        }
+        g_rx_highest_seq = seq;
+        return 0;
+    }
+
+    uint32_t diff = g_rx_highest_seq - seq;
+    if (diff >= 64)
+        return -1;
+
+    uint64_t mask = 1ULL << diff;
+    if (g_rx_replay_window & mask)
+        return -1;
+
+    g_rx_replay_window |= mask;
+    return 0;
+}
 
 static void handle_sigint(int sig)
 {
@@ -254,6 +291,11 @@ int main(int argc, char **argv)
                 // Full packet bounds check: header + payload must fit into u
                 if (header_len + (size_t)payload_len > (size_t)u)
                     continue;
+
+                if (vp_check_replay_from_switch(hdr.seq) < 0) {
+                    LOG_DEBUG("Drop RX DATA from switch: replay or out-of-window (seq=%u)", hdr.seq);
+                    continue;
+                }
 
                 // CRC
                 uint32_t crc = vp_crc32(buf + hdr.header_len, payload_len);

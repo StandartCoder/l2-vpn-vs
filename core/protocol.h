@@ -5,8 +5,8 @@
 #include <stddef.h>
 
 #define VP_MAGIC 0x56504E32  // "VPN2"
-#define VP_VERSION 2
-#define VP_HEADER_WIRE_LEN 24
+#define VP_VERSION 3
+#define VP_HEADER_WIRE_LEN 32
 
 #pragma pack(push, 1)
 typedef struct {
@@ -19,6 +19,7 @@ typedef struct {
     uint32_t client_id;
     uint32_t seq;          // anti-replay / reorder protection
     uint32_t checksum;     // CRC32 payload
+    uint64_t auth_tag;     // MAC over header + payload
 } vp_header_t;
 #pragma pack(pop)
 
