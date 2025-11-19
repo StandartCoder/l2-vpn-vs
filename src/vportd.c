@@ -303,7 +303,7 @@ int main(int argc, char **argv)
             }
 
             // --- BOUNDS CHECK: DROP ILLEGAL FRAMES ---
-            if (r > 1400) {
+            if (r > VP_MAX_FRAME_LEN) {
                 printf("[vportd] Drop TAP frame: too big (%d bytes)\n", r);
                 LOG_DEBUG("Drop TAP frame: too big (%d bytes)", r);
                 continue;

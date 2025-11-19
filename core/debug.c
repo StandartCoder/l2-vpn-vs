@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <string.h>
+#include <strings.h>
 #include <stdarg.h>
 #include <stdint.h>
 
@@ -257,4 +258,3 @@ void vp_log_hexdump(vp_log_level_t level,
         offset = line_end;
     }
 }
-

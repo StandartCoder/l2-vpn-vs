@@ -41,7 +41,8 @@ static vp_tx_rate_entry_t g_tx_rate[VP_MAX_CLIENTS];
 static int vp_tx_rate_allow(uint32_t client_id, uint64_t now_ms)
 {
     const uint64_t window_ms = 100;  // time window
-    const int max_pkts = 64;        // max packets per window per client
+    // Max packets per window per client; must not exceed ts[] capacity (8).
+    const int max_pkts = 8;
 
     // Find or allocate entry for this client_id
     vp_tx_rate_entry_t *e = NULL;
@@ -189,6 +190,13 @@ int main(int argc, char **argv)
 
         int r = vp_os_udp_recv(sock, &src, buf, sizeof(buf));
         if (r < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Idle: non-blocking socket has no data right now.
+                usleep(1000);
+            } else {
+                LOG_WARN("UDP recv error (errno=%d)", errno);
+                usleep(1000);
+            }
             continue;
         }
 

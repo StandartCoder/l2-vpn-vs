@@ -13,8 +13,9 @@ enum vp_pkt_type {
     VP_PKT_ERROR      = 5
 };
 
-// Max Ethernet frame
-#define VP_MAX_FRAME_LEN 1518
+// Max VPN payload size (bytes)
+// Limited below full Ethernet MTU to avoid UDP fragmentation.
+#define VP_MAX_FRAME_LEN 1400
 
 // Max number of connected clients
 #define VP_MAX_CLIENTS 1024

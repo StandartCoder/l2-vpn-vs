@@ -11,12 +11,20 @@ struct vp_os_tap {
 int vp_os_tap_open(struct vp_os_tap **tap, const char *hint)
 {
     int fd = open(VP_LINUX_TAP_PATH, O_RDWR);
-    
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
     if (fd < 0)
         return -1;
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        close(fd);
+        return -1;
+    }
+
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(fd);
+        return -1;
+    }
 
     struct ifreq ifr = {0};
     ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
