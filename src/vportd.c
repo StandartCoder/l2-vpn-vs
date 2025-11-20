@@ -96,8 +96,8 @@ static int vp_do_handshake(struct vp_os_socket *sock,
         .type       = VP_PKT_HELLO,
         .header_len = VP_HEADER_WIRE_LEN,
         .payload_len= 0,
-        .flags      = 0,
-        .client_id  = 0,   // client_id never sent by client
+        .flags      = VP_FLAG_FROM_CLIENT,
+        .client_id  = 0,   // client_id not yet assigned
         .seq        = hello_seq,
         .checksum   = 0
     };
@@ -109,7 +109,8 @@ static int vp_do_handshake(struct vp_os_socket *sock,
     }
 
     uint8_t hello_pkt[VP_HEADER_WIRE_LEN];
-    int hello_len = vp_encode_packet(hello_pkt, sizeof(hello_pkt), &hello, NULL);
+    int hello_len = vp_encode_packet(VP_CRYPTO_DIR_CLIENT_TO_SWITCH,
+                                     hello_pkt, sizeof(hello_pkt), &hello, NULL);
     if (hello_len < 0) {
         printf("[vportd] Failed to encode HELLO packet\n");
         return -1;
@@ -134,7 +135,8 @@ static int vp_do_handshake(struct vp_os_socket *sock,
         }
 
         vp_header_t hdr;
-        if (vp_decode_header(buf, r, &hdr) < 0)
+        if (vp_decode_packet(VP_CRYPTO_DIR_SWITCH_TO_CLIENT,
+                             buf, r, &hdr) < 0)
             continue;
 
         if (hdr.type == VP_PKT_HELLO_ACK) {
@@ -256,13 +258,14 @@ int main(int argc, char **argv)
                 .type       = VP_PKT_KEEPALIVE,
                 .header_len = VP_HEADER_WIRE_LEN,
                 .payload_len= 0,
-                .flags      = 0,
-                .client_id  = 0,   // never send client_id
+                .flags      = VP_FLAG_FROM_CLIENT,
+                .client_id  = g_client_id,
                 .seq        = g_seq++,
                 .checksum   = 0
             };
 
-            int keep_len = vp_encode_packet(pkt, sizeof(pkt), &keep, NULL);
+            int keep_len = vp_encode_packet(VP_CRYPTO_DIR_CLIENT_TO_SWITCH,
+                                            pkt, sizeof(pkt), &keep, NULL);
             if (keep_len > 0) {
                 if (vp_os_udp_send(sock, &srv, pkt, (size_t)keep_len) < 0)
                     LOG_WARN("UDP send KEEPALIVE failed");
@@ -292,7 +295,8 @@ int main(int argc, char **argv)
             vp_header_t hdr;
             if (u < (int)VP_HEADER_WIRE_LEN) continue; // too small
 
-            if (vp_decode_header(buf, u, &hdr) < 0)
+            if (vp_decode_packet(VP_CRYPTO_DIR_SWITCH_TO_CLIENT,
+                                 buf, u, &hdr) < 0)
                 continue;
 
             if (hdr.type == VP_PKT_DATA) {
@@ -373,13 +377,14 @@ int main(int argc, char **argv)
                 .type       = VP_PKT_DATA,
                 .header_len = VP_HEADER_WIRE_LEN,
                 .payload_len= r,
-                .flags      = 0,
-                .client_id  = 0,   // never send client_id
+                .flags      = VP_FLAG_FROM_CLIENT,
+                .client_id  = g_client_id,
                 .seq        = g_seq++,
                 .checksum   = vp_crc32(frame, r)
             };
 
-            int total = vp_encode_packet(pkt, sizeof(pkt), &hdr, frame);
+            int total = vp_encode_packet(VP_CRYPTO_DIR_CLIENT_TO_SWITCH,
+                                         pkt, sizeof(pkt), &hdr, frame);
             if (total < 0)
                 continue;
 

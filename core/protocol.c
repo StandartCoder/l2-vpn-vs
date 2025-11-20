@@ -59,10 +59,18 @@ static uint64_t vp_read_u64_be(const uint8_t *p)
 }
 
 // --------------------------------------
-// Simple keyed MAC (SipHash-2-4)
+// Simple keyed MAC (SipHash-2-4) + keys
 // --------------------------------------
+// g_vp_psk      : 128-bit key used as MAC key for SipHash-2-4
+// g_vp_enc_key  : 256-bit key used for ChaCha20 stream cipher
 static uint8_t g_vp_psk[16];
+static uint8_t g_vp_enc_key[32];
 static int g_vp_psk_loaded = 0;
+
+// Forward declaration for KDF
+static uint64_t vp_siphash24(const uint8_t key[16],
+                             const uint8_t *data,
+                             size_t len);
 
 // Derive a 128-bit key from an arbitrary-length passphrase using
 // a SipHash-based KDF with both CPU and memory cost. This is still
@@ -243,6 +251,127 @@ static uint64_t vp_siphash24(const uint8_t key[16],
     return v0 ^ v1 ^ v2 ^ v3;
 }
 
+// --------------------------------------
+// ChaCha20 stream cipher (RFC 8439 core)
+// --------------------------------------
+
+static uint32_t vp_load_u32_le(const uint8_t *p)
+{
+    return ((uint32_t)p[0])       |
+           ((uint32_t)p[1] << 8)  |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static void vp_store_u32_le(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF);
+    p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+static uint32_t vp_rotl32(uint32_t x, int b)
+{
+    return (x << b) | (x >> (32 - b));
+}
+
+#define VP_CHACHA_QUARTERROUND(a,b,c,d) \
+    do {                                \
+        a += b; d ^= a; d = vp_rotl32(d, 16); \
+        c += d; b ^= c; b = vp_rotl32(b, 12); \
+        a += b; d ^= a; d = vp_rotl32(d, 8);  \
+        c += d; b ^= c; b = vp_rotl32(b, 7);  \
+    } while (0)
+
+static void vp_chacha20_block(const uint8_t key[32],
+                              const uint8_t nonce[12],
+                              uint32_t counter,
+                              uint8_t out[64])
+{
+    static const uint8_t sigma[16] = {
+        'e','x','p','a','n','d',' ','3','2','-','b','y','t','e',' ','k'
+    };
+
+    uint32_t state[16];
+    state[0]  = vp_load_u32_le(sigma + 0);
+    state[1]  = vp_load_u32_le(sigma + 4);
+    state[2]  = vp_load_u32_le(sigma + 8);
+    state[3]  = vp_load_u32_le(sigma + 12);
+    state[4]  = vp_load_u32_le(key + 0);
+    state[5]  = vp_load_u32_le(key + 4);
+    state[6]  = vp_load_u32_le(key + 8);
+    state[7]  = vp_load_u32_le(key + 12);
+    state[8]  = vp_load_u32_le(key + 16);
+    state[9]  = vp_load_u32_le(key + 20);
+    state[10] = vp_load_u32_le(key + 24);
+    state[11] = vp_load_u32_le(key + 28);
+    state[12] = counter;
+    state[13] = vp_load_u32_le(nonce + 0);
+    state[14] = vp_load_u32_le(nonce + 4);
+    state[15] = vp_load_u32_le(nonce + 8);
+
+    uint32_t working[16];
+    for (int i = 0; i < 16; i++)
+        working[i] = state[i];
+
+    for (int i = 0; i < 10; i++) {
+        // odd round (column)
+        VP_CHACHA_QUARTERROUND(working[0], working[4], working[8],  working[12]);
+        VP_CHACHA_QUARTERROUND(working[1], working[5], working[9],  working[13]);
+        VP_CHACHA_QUARTERROUND(working[2], working[6], working[10], working[14]);
+        VP_CHACHA_QUARTERROUND(working[3], working[7], working[11], working[15]);
+        // even round (diagonal)
+        VP_CHACHA_QUARTERROUND(working[0], working[5], working[10], working[15]);
+        VP_CHACHA_QUARTERROUND(working[1], working[6], working[11], working[12]);
+        VP_CHACHA_QUARTERROUND(working[2], working[7], working[8],  working[13]);
+        VP_CHACHA_QUARTERROUND(working[3], working[4], working[9],  working[14]);
+    }
+
+    for (int i = 0; i < 16; i++) {
+        uint32_t v = working[i] + state[i];
+        vp_store_u32_le(out + 4 * i, v);
+    }
+}
+
+static void vp_chacha20_xor(const uint8_t key[32],
+                            const uint8_t nonce[12],
+                            uint32_t counter,
+                            uint8_t *data,
+                            size_t len)
+{
+    uint8_t block[64];
+    size_t offset = 0;
+
+    while (offset < len) {
+        vp_chacha20_block(key, nonce, counter, block);
+        size_t chunk = len - offset;
+        if (chunk > sizeof(block))
+            chunk = sizeof(block);
+
+        for (size_t i = 0; i < chunk; i++)
+            data[offset + i] ^= block[i];
+
+        offset += chunk;
+        counter++;
+    }
+}
+
+// Derive per-packet nonce from direction + client_id + seq.
+// This is public, non-secret data; uniqueness (not secrecy)
+// is what matters here.
+static void vp_build_nonce(vp_crypto_dir_t dir,
+                           const vp_header_t *hdr,
+                           uint8_t nonce[12])
+{
+    uint32_t dir_word =
+        (dir == VP_CRYPTO_DIR_CLIENT_TO_SWITCH) ? 0x43523331u : 0x53523332u; // "CR31"/"SR32"
+
+    vp_store_u32_le(nonce + 0, dir_word);
+    vp_store_u32_le(nonce + 4, hdr->client_id);
+    vp_store_u32_le(nonce + 8, hdr->seq);
+}
+
 static void vp_auth_load_key(void)
 {
     if (g_vp_psk_loaded)
@@ -252,6 +381,7 @@ static void vp_auth_load_key(void)
 
     const char *env = getenv("VP_PSK");
     memset(g_vp_psk, 0, sizeof(g_vp_psk));
+    memset(g_vp_enc_key, 0, sizeof(g_vp_enc_key));
 
     if (!env || !env[0]) {
         fprintf(stderr,
@@ -266,7 +396,19 @@ static void vp_auth_load_key(void)
     if (pass_len > max_pass_len)
         pass_len = max_pass_len;
 
+    // First derive a 128-bit master key from the passphrase.
     vp_kdf_from_psk(env, pass_len, g_vp_psk);
+
+    // Expand master key into a 256-bit encryption key using SipHash
+    // as a simple PRF with domain separation.
+    uint8_t label[4] = { 'E', 'N', 'C', 0 };
+    for (int i = 0; i < 4; i++) {
+        label[3] = (uint8_t)i;
+        uint64_t v = vp_siphash24(g_vp_psk, label, sizeof(label));
+        for (int b = 0; b < 8; b++) {
+            g_vp_enc_key[i * 8 + b] = (uint8_t)(v >> (8 * b));
+        }
+    }
 }
 
 static void vp_pack_header(uint8_t *buf, const vp_header_t *hdr, uint64_t auth_tag)
@@ -298,9 +440,10 @@ uint32_t vp_crc32(const uint8_t *data, size_t len)
 }
 
 // --------------------------------------
-// Encode header + payload
+// Encode header + payload (encrypts DATA)
 // --------------------------------------
-int vp_encode_packet(uint8_t *buf, size_t buf_len,
+int vp_encode_packet(vp_crypto_dir_t dir,
+                     uint8_t *buf, size_t buf_len,
                      const vp_header_t *hdr,
                      const uint8_t *payload)
 {
@@ -321,7 +464,15 @@ int vp_encode_packet(uint8_t *buf, size_t buf_len,
     if (payload && payload_len > 0)
         memcpy(buf + header_len, payload, payload_len);
 
-    // Compute MAC over header (with auth_tag=0) + payload
+    // Encrypt DATA payload in-place using ChaCha20 (stream cipher).
+    if (payload_len > 0 && hdr->type == VP_PKT_DATA) {
+        uint8_t nonce[12];
+        vp_build_nonce(dir, &tmp, nonce);
+        // Counter starts at 1 as in RFC 8439 AEAD construction.
+        vp_chacha20_xor(g_vp_enc_key, nonce, 1, buf + header_len, payload_len);
+    }
+
+    // Compute MAC over header (with auth_tag=0) + payload (ciphertext for DATA).
     uint64_t tag = vp_siphash24(g_vp_psk, buf, total_len);
 
     // Write final header including auth_tag
@@ -332,9 +483,10 @@ int vp_encode_packet(uint8_t *buf, size_t buf_len,
 }
 
 // --------------------------------------
-// Decode + Validate header
+// Decode + authenticate + decrypt (for DATA)
 // --------------------------------------
-int vp_decode_header(const uint8_t *buf, size_t buf_len,
+int vp_decode_packet(vp_crypto_dir_t dir,
+                     uint8_t *buf, size_t buf_len,
                      vp_header_t *hdr)
 {
     vp_auth_load_key();
@@ -386,6 +538,13 @@ int vp_decode_header(const uint8_t *buf, size_t buf_len,
     uint64_t expected = vp_siphash24(g_vp_psk, hdr_bytes, header_len + payload_len);
     if (expected != hdr->auth_tag)
         return -7;
+
+    // Decrypt DATA payload in-place after successful authentication.
+    if (payload_len > 0 && hdr->type == VP_PKT_DATA) {
+        uint8_t nonce[12];
+        vp_build_nonce(dir, &tmp, nonce);
+        vp_chacha20_xor(g_vp_enc_key, nonce, 1, buf + header_len, payload_len);
+    }
 
     return 0;
 }

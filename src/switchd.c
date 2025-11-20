@@ -127,7 +127,8 @@ static void forward_udp(uint32_t src_client_id,
         .checksum = vp_crc32(frame, len)
     };
 
-    int total = vp_encode_packet(pkt, sizeof(pkt), &hdr, frame);
+    int total = vp_encode_packet(VP_CRYPTO_DIR_SWITCH_TO_CLIENT,
+                                 pkt, sizeof(pkt), &hdr, frame);
     if (total < 0)
         return;
 
@@ -217,7 +218,8 @@ int main(int argc, char **argv)
             }
 
             vp_header_t hdr;
-            if (vp_decode_header(buf, r, &hdr) < 0) {
+            if (vp_decode_packet(VP_CRYPTO_DIR_CLIENT_TO_SWITCH,
+                                 buf, r, &hdr) < 0) {
                 LOG_DEBUG("Drop: invalid header (len=%d)", r);
                 continue;
             }
@@ -263,7 +265,8 @@ int main(int argc, char **argv)
                     };
 
                     uint8_t epkt[VP_HEADER_WIRE_LEN];
-                    int elen = vp_encode_packet(epkt, sizeof(epkt), &err, NULL);
+                    int elen = vp_encode_packet(VP_CRYPTO_DIR_SWITCH_TO_CLIENT,
+                                                epkt, sizeof(epkt), &err, NULL);
                     if (elen > 0) {
                         if (vp_os_udp_send(g_sock, &src, epkt, (size_t)elen) < 0)
                             LOG_WARN("UDP send of ERROR (DATA unknown) failed");
@@ -314,7 +317,8 @@ int main(int argc, char **argv)
                     };
 
                     uint8_t epkt[VP_HEADER_WIRE_LEN];
-                    int elen = vp_encode_packet(epkt, sizeof(epkt), &err, NULL);
+                    int elen = vp_encode_packet(VP_CRYPTO_DIR_SWITCH_TO_CLIENT,
+                                                epkt, sizeof(epkt), &err, NULL);
                     if (elen > 0) {
                         if (vp_os_udp_send(g_sock, &src, epkt, (size_t)elen) < 0)
                             LOG_WARN("UDP send of ERROR (KEEPALIVE unknown) failed");
@@ -361,7 +365,8 @@ int main(int argc, char **argv)
             };
 
                 uint8_t pkt[VP_HEADER_WIRE_LEN];
-                int ack_len = vp_encode_packet(pkt, sizeof(pkt), &ack, NULL);
+                int ack_len = vp_encode_packet(VP_CRYPTO_DIR_SWITCH_TO_CLIENT,
+                                               pkt, sizeof(pkt), &ack, NULL);
                 if (ack_len > 0) {
                     if (vp_os_udp_send(g_sock, &src, pkt, (size_t)ack_len) < 0)
                         LOG_WARN("UDP send of HELLO_ACK failed");

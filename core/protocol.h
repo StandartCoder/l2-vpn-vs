@@ -5,8 +5,11 @@
 #include <stddef.h>
 
 #define VP_MAGIC 0x56504E32  // "VPN2"
-#define VP_VERSION 3
+#define VP_VERSION 4
 #define VP_HEADER_WIRE_LEN 32
+
+// Flags
+#define VP_FLAG_FROM_CLIENT 0x0001u  // set on packets originating from vportd
 
 #pragma pack(push, 1)
 typedef struct {
@@ -23,16 +26,24 @@ typedef struct {
 } vp_header_t;
 #pragma pack(pop)
 
+// Crypto direction (affects nonce derivation)
+typedef enum {
+    VP_CRYPTO_DIR_CLIENT_TO_SWITCH = 1,
+    VP_CRYPTO_DIR_SWITCH_TO_CLIENT = 2
+} vp_crypto_dir_t;
+
 // Calculate CRC32
 uint32_t vp_crc32(const uint8_t *data, size_t len);
 
-// Encode header + payload into buffer
-int vp_encode_packet(uint8_t *buf, size_t buf_len,
+// Encode header + payload into buffer (encrypts DATA packets)
+int vp_encode_packet(vp_crypto_dir_t dir,
+                     uint8_t *buf, size_t buf_len,
                      const vp_header_t *hdr,
                      const uint8_t *payload);
 
-// Decode header (and validate magic/version/bounds)
-int vp_decode_header(const uint8_t *buf, size_t buf_len,
+// Decode + authenticate + decrypt (for DATA) in-place
+int vp_decode_packet(vp_crypto_dir_t dir,
+                     uint8_t *buf, size_t buf_len,
                      vp_header_t *hdr);
 
 #endif
