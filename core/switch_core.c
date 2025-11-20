@@ -385,12 +385,13 @@ void vp_switch_handle_frame(
             src_entry->in_use = 1;
         }
     } else {
-        // MAC already learned: only accept frames from the same client_id.
-        // If a different client claims this MAC, drop the frame and keep
-        // the existing mapping until it times out.
-        if (src_entry->client_id != src_client_id)
-            return;
-
+        // MAC already learned: if a different client now claims this MAC,
+        // rebind the mapping to the new client_id. This ensures that a
+        // reconnecting client (new client_id, same MAC) becomes reachable
+        // immediately instead of waiting for the old mapping to age out.
+        if (src_entry->client_id != src_client_id) {
+            src_entry->client_id = src_client_id;
+        }
         src_entry->last_seen_ms = now_ms;
     }
 
