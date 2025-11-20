@@ -140,7 +140,14 @@ static int vp_do_handshake(struct vp_os_socket *sock,
 
     uint64_t deadline = now + 3000; // 3s Timeout for HELLO_ACK
 
-    while (g_running && vp_os_linux_get_time_ms() < deadline) {
+    while (g_running) {
+#if defined(__APPLE__)
+        uint64_t now_loop = vp_os_macos_get_time_ms();
+#else
+        uint64_t now_loop = vp_os_linux_get_time_ms();
+#endif
+        if (now_loop >= deadline)
+            break;
         struct vp_os_addr src;
         uint8_t buf[256];
 
