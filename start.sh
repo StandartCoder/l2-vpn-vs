@@ -149,25 +149,6 @@ if [[ "$OS_NAME" == "Linux" ]]; then
     echo "    - Assigning IP $IP/24"
     ip addr flush dev tap0 || true
     ip addr add "$IP/24" dev tap0
-
-else
-    echo "[*] Configuring TAP on macOS"
-
-    # Require /dev/tap0 to exist (e.g. from a tun/tap driver).
-    if [[ ! -e /dev/tap0 ]]; then
-        echo "Error: /dev/tap0 not found."
-        echo "Install and load a TAP driver (find help at https://github.com/ntop/n2n/issues/773) before running this script."
-        exit 1
-    fi
-
-    if ifconfig tap0 >/dev/null 2>&1; then
-        echo "    - tap0 exists → resetting configuration"
-        ifconfig tap0 down || true
-    fi
-
-    echo "    - Assigning IP $IP/24 and bringing tap0 up"
-    # On macOS, set the interface IP with itself as the peer.
-    ifconfig tap0 inet "$IP" "$IP" netmask 255.255.255.0 up
 fi
 
 echo
