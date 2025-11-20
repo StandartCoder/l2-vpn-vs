@@ -5,7 +5,7 @@
 
 // Hashing parameters
 #define VP_MAC_BUCKETS        256
-#define VP_MAC_BUCKET_SIZE      4
+#define VP_MAC_BUCKET_SIZE      8
 #define VP_CLIENT_MAX      VP_MAX_CLIENTS
 #define VP_CLIENT_ADDR_BUCKETS 256
 #define VP_CLIENT_ADDR_BUCKET_SIZE 4
