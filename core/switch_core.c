@@ -4,8 +4,11 @@
 #include "../include/os_net.h"
 
 // Hashing parameters
-#define VP_MAC_BUCKETS        256
-#define VP_MAC_BUCKET_SIZE      8
+// MAC table: 1024 buckets * 8 entries = 8192 MACs
+// This is large enough for realistic small/medium L2 domains and
+// keeps flood iterations cheap.
+#define VP_MAC_BUCKETS        1024
+#define VP_MAC_BUCKET_SIZE       8
 #define VP_CLIENT_MAX      VP_MAX_CLIENTS
 #define VP_CLIENT_ADDR_BUCKETS 256
 #define VP_CLIENT_ADDR_BUCKET_SIZE 4
@@ -80,6 +83,30 @@ static vp_mac_entry_t *mac_find_free_slot(uint32_t bucket)
             return &mac_table[bucket][i];
     }
     return NULL;
+}
+
+// When a bucket is full, evict the least recently used MAC in this
+// bucket (oldest last_seen_ms). This avoids silent failure to learn
+// new MACs under hash collisions and keeps behaviour predictable.
+static vp_mac_entry_t *mac_find_lru_slot(uint32_t bucket)
+{
+    vp_mac_entry_t *victim = &mac_table[bucket][0];
+    uint64_t oldest = victim->last_seen_ms;
+
+    for (int i = 1; i < VP_MAC_BUCKET_SIZE; i++) {
+        vp_mac_entry_t *e = &mac_table[bucket][i];
+        if (!e->in_use) {
+            // Should not happen if caller only uses this on full buckets,
+            // but treat an unused slot as the best victim.
+            return e;
+        }
+        if (e->last_seen_ms < oldest) {
+            oldest = e->last_seen_ms;
+            victim = e;
+        }
+    }
+
+    return victim;
 }
 
 static vp_client_addr_entry_t *client_addr_find_entry(const struct vp_os_addr *addr)
@@ -315,6 +342,10 @@ void vp_switch_handle_frame(
     vp_mac_entry_t *src_entry = mac_find_entry(&src);
     if (!src_entry) {
         src_entry = mac_find_free_slot(src_bucket);
+        if (!src_entry) {
+            // Bucket full: evict least-recently-used entry in this bucket.
+            src_entry = mac_find_lru_slot(src_bucket);
+        }
         if (src_entry) {
             src_entry->mac = src;
             src_entry->client_id = src_client_id;
