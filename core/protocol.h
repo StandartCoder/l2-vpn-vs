@@ -6,7 +6,7 @@
 
 #define VP_MAGIC 0x56504E32  // "VPN2"
 #define VP_VERSION 4
-#define VP_HEADER_WIRE_LEN 32
+#define VP_HEADER_WIRE_LEN 40
 
 // Flags
 #define VP_FLAG_FROM_CLIENT 0x0001u  // set on packets originating from vportd
@@ -22,7 +22,7 @@ typedef struct {
     uint32_t client_id;
     uint32_t seq;          // anti-replay / reorder protection
     uint32_t checksum;     // CRC32 payload
-    uint64_t auth_tag;     // MAC over header + payload
+    uint8_t  auth_tag[16]; // AEAD tag (ChaCha20-Poly1305)
 } vp_header_t;
 #pragma pack(pop)
 

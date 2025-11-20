@@ -34,30 +34,6 @@ static uint32_t vp_read_u32_be(const uint8_t *p)
            ((uint32_t)p[3]);
 }
 
-static void vp_write_u64_be(uint8_t *p, uint64_t v)
-{
-    p[0] = (uint8_t)((v >> 56) & 0xFF);
-    p[1] = (uint8_t)((v >> 48) & 0xFF);
-    p[2] = (uint8_t)((v >> 40) & 0xFF);
-    p[3] = (uint8_t)((v >> 32) & 0xFF);
-    p[4] = (uint8_t)((v >> 24) & 0xFF);
-    p[5] = (uint8_t)((v >> 16) & 0xFF);
-    p[6] = (uint8_t)((v >> 8) & 0xFF);
-    p[7] = (uint8_t)(v & 0xFF);
-}
-
-static uint64_t vp_read_u64_be(const uint8_t *p)
-{
-    return (((uint64_t)p[0]) << 56) |
-           (((uint64_t)p[1]) << 48) |
-           (((uint64_t)p[2]) << 40) |
-           (((uint64_t)p[3]) << 32) |
-           (((uint64_t)p[4]) << 24) |
-           (((uint64_t)p[5]) << 16) |
-           (((uint64_t)p[6]) << 8)  |
-           ((uint64_t)p[7]);
-}
-
 // --------------------------------------
 // Simple keyed MAC (SipHash-2-4) + keys
 // --------------------------------------
@@ -411,7 +387,7 @@ static void vp_auth_load_key(void)
     }
 }
 
-static void vp_pack_header(uint8_t *buf, const vp_header_t *hdr, uint64_t auth_tag)
+static void vp_pack_header(uint8_t *buf, const vp_header_t *hdr)
 {
     vp_write_u32_be(buf + 0, hdr->magic);
     buf[4] = hdr->version;
@@ -422,7 +398,8 @@ static void vp_pack_header(uint8_t *buf, const vp_header_t *hdr, uint64_t auth_t
     vp_write_u32_be(buf + 12, hdr->client_id);
     vp_write_u32_be(buf + 16, hdr->seq);
     vp_write_u32_be(buf + 20, hdr->checksum);
-    vp_write_u64_be(buf + 24, auth_tag);
+    // auth_tag starts at offset 24, 16 bytes
+    memcpy(buf + 24, hdr->auth_tag, 16);
 }
 
 // --------------------------------------
@@ -440,7 +417,209 @@ uint32_t vp_crc32(const uint8_t *data, size_t len)
 }
 
 // --------------------------------------
-// Encode header + payload (encrypts DATA)
+// Poly1305 (for ChaCha20-Poly1305 AEAD)
+// --------------------------------------
+
+typedef struct {
+    uint64_t r0, r1, r2;
+    uint64_t s1, s2;
+    uint64_t h0, h1, h2;
+    uint64_t pad0, pad1;
+} vp_poly1305_state_t;
+
+static void vp_poly1305_init(vp_poly1305_state_t *st, const uint8_t key[32])
+{
+    uint64_t t0 = ((uint64_t)vp_load_u32_le(key + 0)) |
+                  ((uint64_t)vp_load_u32_le(key + 4) << 32);
+    uint64_t t1 = ((uint64_t)vp_load_u32_le(key + 8)) |
+                  ((uint64_t)vp_load_u32_le(key + 12) << 32);
+
+    uint64_t r0 = (t0) & 0xffc0fffffffULL;
+    uint64_t r1 = ((t0 >> 44) | (t1 << 20)) & 0xfffffc0ffffULL;
+    uint64_t r2 = (t1 >> 24) & 0x00ffffffc0fULL;
+
+    st->r0 = r0;
+    st->r1 = r1;
+    st->r2 = r2;
+    st->s1 = r1 * 5;
+    st->s2 = r2 * 5;
+
+    st->h0 = 0;
+    st->h1 = 0;
+    st->h2 = 0;
+
+    uint64_t t2 = ((uint64_t)vp_load_u32_le(key + 16)) |
+                  ((uint64_t)vp_load_u32_le(key + 20) << 32);
+    uint64_t t3 = ((uint64_t)vp_load_u32_le(key + 24)) |
+                  ((uint64_t)vp_load_u32_le(key + 28) << 32);
+
+    st->pad0 = t2;
+    st->pad1 = t3;
+}
+
+static void vp_poly1305_block(vp_poly1305_state_t *st,
+                              const uint8_t *m,
+                              size_t remaining,
+                              int is_final)
+{
+    uint64_t t0, t1;
+
+    if (remaining >= 16) {
+        t0 = ((uint64_t)vp_load_u32_le(m + 0)) |
+             ((uint64_t)vp_load_u32_le(m + 4) << 32);
+        t1 = ((uint64_t)vp_load_u32_le(m + 8)) |
+             ((uint64_t)vp_load_u32_le(m + 12) << 32);
+    } else {
+        uint8_t tmp[16] = {0};
+        if (remaining > 0)
+            memcpy(tmp, m, remaining);
+        tmp[remaining] = 1;
+        t0 = ((uint64_t)vp_load_u32_le(tmp + 0)) |
+             ((uint64_t)vp_load_u32_le(tmp + 4) << 32);
+        t1 = ((uint64_t)vp_load_u32_le(tmp + 8)) |
+             ((uint64_t)vp_load_u32_le(tmp + 12) << 32);
+    }
+
+    uint64_t h0 = st->h0;
+    uint64_t h1 = st->h1;
+    uint64_t h2 = st->h2;
+
+    h0 += ( t0                    ) & 0xfffffffffffULL;
+    h1 += (((t0 >> 44) | (t1 << 20)) & 0xfffffffffffULL);
+    h2 += ( (t1 >> 24)             & 0x3ffffffffffULL);
+    if (!is_final)
+        h2 += (1ULL << 40);
+
+    uint64_t r0 = st->r0;
+    uint64_t r1 = st->r1;
+    uint64_t r2 = st->r2;
+    uint64_t s1 = st->s1;
+    uint64_t s2 = st->s2;
+
+    __uint128_t d0 = (__uint128_t)h0 * r0 +
+                     (__uint128_t)h1 * s2 +
+                     (__uint128_t)h2 * s1;
+    __uint128_t d1 = (__uint128_t)h0 * r1 +
+                     (__uint128_t)h1 * r0 +
+                     (__uint128_t)h2 * s2;
+    __uint128_t d2 = (__uint128_t)h0 * r2 +
+                     (__uint128_t)h1 * r1 +
+                     (__uint128_t)h2 * r0;
+
+    uint64_t c;
+
+    h0 = (uint64_t)d0 & 0xfffffffffffULL;
+    c  = (uint64_t)(d0 >> 44);
+    d1 += c;
+    h1 = (uint64_t)d1 & 0xfffffffffffULL;
+    c  = (uint64_t)(d1 >> 44);
+    d2 += c;
+    h2 = (uint64_t)d2 & 0x3ffffffffffULL;
+    c  = (uint64_t)(d2 >> 42);
+    h0 += c * 5;
+    c  = h0 >> 44;
+    h0 &= 0xfffffffffffULL;
+    h1 += c;
+
+    st->h0 = h0;
+    st->h1 = h1;
+    st->h2 = h2;
+}
+
+static void vp_poly1305_update(vp_poly1305_state_t *st,
+                               const uint8_t *m,
+                               size_t bytes)
+{
+    while (bytes >= 16) {
+        vp_poly1305_block(st, m, 16, 0);
+        m     += 16;
+        bytes -= 16;
+    }
+    if (bytes > 0)
+        vp_poly1305_block(st, m, bytes, 0);
+}
+
+static void vp_poly1305_finish(vp_poly1305_state_t *st, uint8_t out[16])
+{
+    uint64_t h0 = st->h0;
+    uint64_t h1 = st->h1;
+    uint64_t h2 = st->h2;
+
+    uint64_t c = h1 >> 44;
+    h1 &= 0xfffffffffffULL;
+    h2 += c;
+    c = h2 >> 42;
+    h2 &= 0x3ffffffffffULL;
+    h0 += c * 5;
+    c = h0 >> 44;
+    h0 &= 0xfffffffffffULL;
+    h1 += c;
+
+    uint64_t g0 = h0 + 5;
+    c  = g0 >> 44;
+    g0 &= 0xfffffffffffULL;
+    uint64_t g1 = h1 + c;
+    c  = g1 >> 44;
+    g1 &= 0xfffffffffffULL;
+    uint64_t g2 = h2 + c - (1ULL << 42);
+
+    uint64_t mask = (g2 >> 63) - 1;
+    g0 &= mask;
+    g1 &= mask;
+    g2 &= mask;
+    mask = ~mask;
+    h0 = (h0 & mask) | g0;
+    h1 = (h1 & mask) | g1;
+    h2 = (h2 & mask) | g2;
+
+    h0 = ((h0      )      ) | (h1 << 44);
+    h1 = ((h1 >> 20)      ) | (h2 << 24);
+
+    h0 += st->pad0;
+    h1 += st->pad1;
+
+    vp_store_u32_le(out + 0,  (uint32_t)(h0));
+    vp_store_u32_le(out + 4,  (uint32_t)(h0 >> 32));
+    vp_store_u32_le(out + 8,  (uint32_t)(h1));
+    vp_store_u32_le(out + 12, (uint32_t)(h1 >> 32));
+}
+
+static void vp_poly1305_aead(uint8_t out_tag[16],
+                             const uint8_t otk[32],
+                             const uint8_t *aad, size_t aad_len,
+                             const uint8_t *cipher, size_t cipher_len)
+{
+    vp_poly1305_state_t st;
+    vp_poly1305_init(&st, otk);
+
+    if (aad_len > 0)
+        vp_poly1305_update(&st, aad, aad_len);
+
+    if (aad_len % 16) {
+        uint8_t zero[16] = {0};
+        vp_poly1305_update(&st, zero, 16 - (aad_len % 16));
+    }
+
+    if (cipher_len > 0)
+        vp_poly1305_update(&st, cipher, cipher_len);
+
+    if (cipher_len % 16) {
+        uint8_t zero[16] = {0};
+        vp_poly1305_update(&st, zero, 16 - (cipher_len % 16));
+    }
+
+    uint8_t len_block[16];
+    vp_store_u32_le(len_block + 0,  (uint32_t)(aad_len & 0xffffffffu));
+    vp_store_u32_le(len_block + 4,  (uint32_t)(aad_len >> 32));
+    vp_store_u32_le(len_block + 8,  (uint32_t)(cipher_len & 0xffffffffu));
+    vp_store_u32_le(len_block + 12, (uint32_t)(cipher_len >> 32));
+    vp_poly1305_update(&st, len_block, sizeof(len_block));
+
+    vp_poly1305_finish(&st, out_tag);
+}
+
+// --------------------------------------
+// Encode header + payload (ChaCha20-Poly1305)
 // --------------------------------------
 int vp_encode_packet(vp_crypto_dir_t dir,
                      uint8_t *buf, size_t buf_len,
@@ -455,35 +634,37 @@ int vp_encode_packet(vp_crypto_dir_t dir,
     if (buf_len < total_len)
         return -1;
 
-    // Serialize header with auth_tag=0 for MAC computation
     vp_header_t tmp = *hdr;
     tmp.header_len = (uint16_t)header_len;
-    tmp.auth_tag = 0;
-    vp_pack_header(buf, &tmp, 0);
+    memset(tmp.auth_tag, 0, sizeof(tmp.auth_tag));
+    vp_pack_header(buf, &tmp);
 
     if (payload && payload_len > 0)
         memcpy(buf + header_len, payload, payload_len);
 
-    // Encrypt DATA payload in-place using ChaCha20 (stream cipher).
+    uint8_t nonce[12];
+    vp_build_nonce(dir, &tmp, nonce);
+
     if (payload_len > 0 && hdr->type == VP_PKT_DATA) {
-        uint8_t nonce[12];
-        vp_build_nonce(dir, &tmp, nonce);
-        // Counter starts at 1 as in RFC 8439 AEAD construction.
         vp_chacha20_xor(g_vp_enc_key, nonce, 1, buf + header_len, payload_len);
     }
 
-    // Compute MAC over header (with auth_tag=0) + payload (ciphertext for DATA).
-    uint64_t tag = vp_siphash24(g_vp_psk, buf, total_len);
+    uint8_t block0[64];
+    vp_chacha20_block(g_vp_enc_key, nonce, 0, block0);
+    uint8_t otk[32];
+    memcpy(otk, block0, sizeof(otk));
 
-    // Write final header including auth_tag
-    tmp.auth_tag = tag;
-    vp_pack_header(buf, &tmp, tag);
+    uint8_t tag[16];
+    vp_poly1305_aead(tag, otk, buf, header_len, buf + header_len, payload_len);
+
+    memcpy(tmp.auth_tag, tag, sizeof(tmp.auth_tag));
+    vp_pack_header(buf, &tmp);
 
     return (int)total_len;
 }
 
 // --------------------------------------
-// Decode + authenticate + decrypt (for DATA)
+// Decode + authenticate + decrypt (ChaCha20-Poly1305)
 // --------------------------------------
 int vp_decode_packet(vp_crypto_dir_t dir,
                      uint8_t *buf, size_t buf_len,
@@ -509,40 +690,40 @@ int vp_decode_packet(vp_crypto_dir_t dir,
     hdr->client_id   = vp_read_u32_be(buf + 12);
     hdr->seq         = vp_read_u32_be(buf + 16);
     hdr->checksum    = vp_read_u32_be(buf + 20);
-    hdr->auth_tag    = vp_read_u64_be(buf + 24);
+    memcpy(hdr->auth_tag, buf + 24, 16);
 
-    // Basic bounds validation
     size_t header_len = hdr->header_len;
     size_t payload_len = hdr->payload_len;
 
-    if (header_len < VP_HEADER_WIRE_LEN)
+    if (header_len != VP_HEADER_WIRE_LEN)
         return -4;
-
     if (buf_len < header_len + payload_len)
         return -4;
-
-    // Verify MAC over header (with auth_tag=0) + payload
-    vp_header_t tmp = *hdr;
-    tmp.auth_tag = 0;
-
-    uint8_t hdr_bytes[VP_HEADER_WIRE_LEN + VP_MAX_FRAME_LEN];
-    if (header_len > VP_HEADER_WIRE_LEN)
-        return -5;
     if (payload_len > VP_MAX_FRAME_LEN)
+        return -5;
+
+    uint8_t nonce[12];
+    vp_build_nonce(dir, hdr, nonce);
+
+    uint8_t block0[64];
+    vp_chacha20_block(g_vp_enc_key, nonce, 0, block0);
+    uint8_t otk[32];
+    memcpy(otk, block0, sizeof(otk));
+
+    uint8_t aad[VP_HEADER_WIRE_LEN];
+    memcpy(aad, buf, header_len);
+    memset(aad + 24, 0, 16);
+
+    uint8_t tag[16];
+    vp_poly1305_aead(tag, otk, aad, header_len, buf + header_len, payload_len);
+
+    uint32_t diff = 0;
+    for (int i = 0; i < 16; i++)
+        diff |= (uint32_t)(tag[i] ^ hdr->auth_tag[i]);
+    if (diff != 0)
         return -6;
 
-    vp_pack_header(hdr_bytes, &tmp, 0);
-    if (payload_len > 0)
-        memcpy(hdr_bytes + header_len, buf + header_len, payload_len);
-
-    uint64_t expected = vp_siphash24(g_vp_psk, hdr_bytes, header_len + payload_len);
-    if (expected != hdr->auth_tag)
-        return -7;
-
-    // Decrypt DATA payload in-place after successful authentication.
     if (payload_len > 0 && hdr->type == VP_PKT_DATA) {
-        uint8_t nonce[12];
-        vp_build_nonce(dir, &tmp, nonce);
         vp_chacha20_xor(g_vp_enc_key, nonce, 1, buf + header_len, payload_len);
     }
 
