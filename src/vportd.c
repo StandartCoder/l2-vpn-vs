@@ -106,7 +106,7 @@ static int vp_do_handshake(struct vp_os_socket *sock,
         .flags      = VP_FLAG_FROM_CLIENT,
         .client_id  = 0,   // client_id not yet assigned
         .seq        = hello_seq,
-        .checksum   = 0
+        .checksum   = vp_crc32(client_nonce, sizeof(client_nonce))
     };
 
     if (is_reconnect) {

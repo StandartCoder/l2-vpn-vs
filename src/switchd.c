@@ -388,7 +388,7 @@ int main(int argc, char **argv)
                 .flags = 0,
                 .client_id = cid,
                 .seq = hdr.seq,
-                .checksum = 0
+                .checksum = vp_crc32(server_nonce, sizeof(server_nonce))
             };
 
                 uint8_t pkt[VP_HEADER_WIRE_LEN + 32];
