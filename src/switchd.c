@@ -35,6 +35,7 @@ typedef struct {
     uint64_t ts[8];  // small ring of send timestamps
     int      count;
     int      head;
+    int      in_use;
 } vp_tx_rate_entry_t;
 
 static vp_tx_rate_entry_t g_tx_rate[VP_MAX_CLIENTS];
@@ -48,22 +49,29 @@ static int vp_tx_rate_allow(uint32_t client_id, uint64_t now_ms)
     // Find or allocate entry for this client_id
     vp_tx_rate_entry_t *e = NULL;
     for (int i = 0; i < VP_MAX_CLIENTS; i++) {
-        if (g_tx_rate[i].client_id == client_id) {
+        if (g_tx_rate[i].in_use && g_tx_rate[i].client_id == client_id) {
             e = &g_tx_rate[i];
             break;
         }
-        if (g_tx_rate[i].client_id == 0 && e == NULL) {
-            e = &g_tx_rate[i];
-        }
     }
 
-    if (!e)
-        return 0;
+    if (!e) {
+        // No existing entry → find a free slot
+        for (int i = 0; i < VP_MAX_CLIENTS; i++) {
+            if (!g_tx_rate[i].in_use) {
+                e = &g_tx_rate[i];
+                break;
+            }
+        }
+        if (!e)
+            return 0;
+    }
 
-    if (e->client_id == 0) {
+    if (!e->in_use) {
         e->client_id = client_id;
         e->count = 0;
         e->head = 0;
+        e->in_use = 1;
     }
 
     // Drop timestamps older than window_ms
