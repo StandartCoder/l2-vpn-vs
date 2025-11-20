@@ -1,6 +1,11 @@
 #include "../include/os_tap.h"
 #include "../include/os_net.h"
+
+#if defined(__APPLE__)
+#include "../os/macos/os_macos_common.h"
+#else
 #include "../os/linux/os_linux_common.h"
+#endif
 #include "../core/protocol.h"
 #include "../include/vp_types.h"
 #include "../include/vp_debug.h"
@@ -82,7 +87,11 @@ static int vp_do_handshake(struct vp_os_socket *sock,
                            uint64_t *last_hello,
                            int is_reconnect)
 {
+#if defined(__APPLE__)
+    uint64_t now = vp_os_macos_get_time_ms();
+#else
     uint64_t now = vp_os_linux_get_time_ms();
+#endif
 
     // Use a per-handshake nonce in seq to bind HELLO_ACKs
     // to the corresponding HELLO and prevent replay of old ACKs.
@@ -165,7 +174,12 @@ static int vp_do_handshake(struct vp_os_socket *sock,
             memcpy(session_id + 16, buf + hdr.header_len, 16);
             vp_crypto_set_session(session_id);
 
-            uint64_t t = vp_os_linux_get_time_ms();
+            uint64_t t =
+#if defined(__APPLE__)
+                vp_os_macos_get_time_ms();
+#else
+                vp_os_linux_get_time_ms();
+#endif
             *last_recv      = t;
             *last_activity  = t;
             *last_keepalive = t;
@@ -242,7 +256,12 @@ int main(int argc, char **argv)
 
     while (g_running) {
 
-        uint64_t now = vp_os_linux_get_time_ms();
+        uint64_t now =
+#if defined(__APPLE__)
+            vp_os_macos_get_time_ms();
+#else
+            vp_os_linux_get_time_ms();
+#endif
 
         // -------------------------------
         // 1) ADAPTIVE KEEPALIVE LOGIC
