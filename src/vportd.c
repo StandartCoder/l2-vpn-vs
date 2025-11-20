@@ -148,6 +148,8 @@ static int vp_do_handshake(struct vp_os_socket *sock,
                    is_reconnect ? "Re-assigned" : "Assigned",
                    g_client_id);
 
+            g_seq = 1;
+
             uint64_t t = vp_os_linux_get_time_ms();
             *last_recv      = t;
             *last_activity  = t;
