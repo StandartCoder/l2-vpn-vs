@@ -83,6 +83,13 @@ int vp_os_udp_recv(struct vp_os_socket *sock,
     return (int)r;
 }
 
+int vp_os_udp_get_fd(struct vp_os_socket *sock)
+{
+    if (!sock)
+        return -1;
+    return sock->fd;
+}
+
 void vp_os_udp_close(struct vp_os_socket *sock)
 {
     if (!sock)

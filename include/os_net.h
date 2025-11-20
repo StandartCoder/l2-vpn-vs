@@ -27,6 +27,9 @@ int vp_os_udp_recv(struct vp_os_socket *sock,
                    uint8_t *buf,
                    size_t max_len);
 
+// Access underlying OS socket descriptor (for select/poll).
+int vp_os_udp_get_fd(struct vp_os_socket *sock);
+
 // Cleanup
 void vp_os_udp_close(struct vp_os_socket *sock);
 

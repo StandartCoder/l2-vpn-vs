@@ -9,6 +9,7 @@
 #include <string.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <sys/select.h>
 
 #define VP_COMP "switchd"
 
@@ -176,165 +177,189 @@ int main(int argc, char **argv)
     printf("[switchd] Listening on UDP port %d\n", ntohs(port_be));
     LOG_INFO("Listening on UDP port %d", ntohs(port_be));
 
+    int udp_fd = vp_os_udp_get_fd(sock);
+
     while (g_running) {
         uint64_t now = vp_os_linux_get_time_ms();
         vp_switch_flush_stale(now);
 
-        int r = vp_os_udp_recv(sock, &src, buf, sizeof(buf));
-        if (r < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Idle: non-blocking socket has no data right now.
-                usleep(1000);
-            } else {
-                LOG_WARN("UDP recv error (errno=%d)", errno);
-                usleep(1000);
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(udp_fd, &rfds);
+
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000; // 100 ms
+
+        int n = select(udp_fd + 1, &rfds, NULL, NULL, &tv);
+        if (!g_running)
+            break;
+
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            LOG_WARN("select() failed (errno=%d)", errno);
+            continue;
+        }
+
+        if (n == 0 || !FD_ISSET(udp_fd, &rfds)) {
+            // timeout, no UDP ready; continue to next iteration
+            continue;
+        }
+
+        // Drain all pending UDP packets
+        for (;;) {
+            int r = vp_os_udp_recv(sock, &src, buf, sizeof(buf));
+            if (r < 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK)
+                    LOG_WARN("UDP recv error (errno=%d)", errno);
+                break;
             }
-            continue;
-        }
 
-        vp_header_t hdr;
-        if (vp_decode_header(buf, r, &hdr) < 0) {
-            LOG_DEBUG("Drop: invalid header (len=%d)", r);
-            continue;
-        }
-
-        int payload_len = hdr.payload_len;
-        size_t header_len = hdr.header_len;
-
-        // Bounds check
-        if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN) {
-            LOG_DEBUG("Drop: invalid payload_len=%d", payload_len);
-            continue;
-        }
-
-        // Full packet bounds check: header + payload must fit into r
-        if (header_len + (size_t)payload_len > (size_t)r) {
-            LOG_DEBUG("Drop: header_len(%zu)+payload_len(%d) > packet_len(%d)",
-                      header_len, payload_len, r);
-            continue;
-        }
-
-        // Verify checksum
-        uint32_t crc = vp_crc32(buf + hdr.header_len, payload_len);
-        if (crc != hdr.checksum) {
-            LOG_DEBUG("Drop: checksum mismatch");
-            continue;
-        }
-
-        if (hdr.type == VP_PKT_DATA) {
-            uint32_t src_client_id;
-            if (vp_switch_get_client_id_for_addr(&src, &src_client_id) < 0) {
-                LOG_DEBUG("Drop DATA: unknown client addr");
-                // Inform client so it can re-HELLO after switch restart.
-                vp_header_t err = {
-                    .magic      = VP_MAGIC,
-                    .version    = VP_VERSION,
-                    .type       = VP_PKT_ERROR,
-                    .header_len = VP_HEADER_WIRE_LEN,
-                    .payload_len= 0,
-                    .flags      = 0,
-                    .client_id  = 0,
-                    .seq        = 0,
-                    .checksum   = 0
-                };
-
-                uint8_t epkt[VP_HEADER_WIRE_LEN];
-                int elen = vp_encode_packet(epkt, sizeof(epkt), &err, NULL);
-                if (elen > 0) {
-                    if (vp_os_udp_send(g_sock, &src, epkt, (size_t)elen) < 0)
-                        LOG_WARN("UDP send of ERROR (DATA unknown) failed");
-                }
+            vp_header_t hdr;
+            if (vp_decode_header(buf, r, &hdr) < 0) {
+                LOG_DEBUG("Drop: invalid header (len=%d)", r);
                 continue;
             }
 
-            if (vp_switch_check_replay(src_client_id, hdr.seq) < 0) {
-                LOG_DEBUG("Drop DATA: replay or out-of-window (seq=%u)", hdr.seq);
-                continue;
-            }
+            int payload_len = hdr.payload_len;
+            size_t header_len = hdr.header_len;
 
-            vp_switch_update_client(src_client_id, &src, now);
-
-            // invalid or overflow?
+            // Bounds check
             if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN) {
-                printf("[switchd] Drop bad frame: size=%d\n", payload_len);
-                LOG_DEBUG("Drop DATA: bad size=%d", payload_len);
+                LOG_DEBUG("Drop: invalid payload_len=%d", payload_len);
                 continue;
             }
 
-            LOG_TRACE("RX DATA from client_id=%u len=%d", src_client_id, payload_len);
-            LOG_HEXDUMP_TRACE("RX frame", buf + hdr.header_len, (size_t)payload_len);
+            // Full packet bounds check: header + payload must fit into r
+            if (header_len + (size_t)payload_len > (size_t)r) {
+                LOG_DEBUG("Drop: header_len(%zu)+payload_len(%d) > packet_len(%d)",
+                          header_len, payload_len, r);
+                continue;
+            }
 
-            vp_switch_handle_frame(
-                src_client_id,
-                buf + hdr.header_len,
-                payload_len,
-                now,
-                forward_udp
-            );
-        }
+            // Verify checksum
+            uint32_t crc = vp_crc32(buf + hdr.header_len, payload_len);
+            if (crc != hdr.checksum) {
+                LOG_DEBUG("Drop: checksum mismatch");
+                continue;
+            }
 
-        if (hdr.type == VP_PKT_KEEPALIVE) {
-            uint32_t src_client_id;
-            if (vp_switch_get_client_id_for_addr(&src, &src_client_id) < 0) {
-                // Unknown address sending KEEPALIVE → tell client to re-HELLO.
-                vp_header_t err = {
-                    .magic      = VP_MAGIC,
-                    .version    = VP_VERSION,
-                    .type       = VP_PKT_ERROR,
+            if (hdr.type == VP_PKT_DATA) {
+                uint32_t src_client_id;
+                if (vp_switch_get_client_id_for_addr(&src, &src_client_id) < 0) {
+                    LOG_DEBUG("Drop DATA: unknown client addr");
+                    // Inform client so it can re-HELLO after switch restart.
+                    vp_header_t err = {
+                        .magic      = VP_MAGIC,
+                        .version    = VP_VERSION,
+                        .type       = VP_PKT_ERROR,
+                        .header_len = VP_HEADER_WIRE_LEN,
+                        .payload_len= 0,
+                        .flags      = 0,
+                        .client_id  = 0,
+                        .seq        = 0,
+                        .checksum   = 0
+                    };
+
+                    uint8_t epkt[VP_HEADER_WIRE_LEN];
+                    int elen = vp_encode_packet(epkt, sizeof(epkt), &err, NULL);
+                    if (elen > 0) {
+                        if (vp_os_udp_send(g_sock, &src, epkt, (size_t)elen) < 0)
+                            LOG_WARN("UDP send of ERROR (DATA unknown) failed");
+                    }
+                    continue;
+                }
+
+                if (vp_switch_check_replay(src_client_id, hdr.seq) < 0) {
+                    LOG_DEBUG("Drop DATA: replay or out-of-window (seq=%u)", hdr.seq);
+                    continue;
+                }
+
+                vp_switch_update_client(src_client_id, &src, now);
+
+                // invalid or overflow?
+                if (payload_len < 0 || payload_len > VP_MAX_FRAME_LEN) {
+                    printf("[switchd] Drop bad frame: size=%d\n", payload_len);
+                    LOG_DEBUG("Drop DATA: bad size=%d", payload_len);
+                    continue;
+                }
+
+                LOG_TRACE("RX DATA from client_id=%u len=%d", src_client_id, payload_len);
+                LOG_HEXDUMP_TRACE("RX frame", buf + hdr.header_len, (size_t)payload_len);
+
+                vp_switch_handle_frame(
+                    src_client_id,
+                    buf + hdr.header_len,
+                    payload_len,
+                    now,
+                    forward_udp
+                );
+            }
+
+            if (hdr.type == VP_PKT_KEEPALIVE) {
+                uint32_t src_client_id;
+                if (vp_switch_get_client_id_for_addr(&src, &src_client_id) < 0) {
+                    // Unknown address sending KEEPALIVE → tell client to re-HELLO.
+                    vp_header_t err = {
+                        .magic      = VP_MAGIC,
+                        .version    = VP_VERSION,
+                        .type       = VP_PKT_ERROR,
+                        .header_len = VP_HEADER_WIRE_LEN,
+                        .payload_len= 0,
+                        .flags      = 0,
+                        .client_id  = 0,
+                        .seq        = 0,
+                        .checksum   = 0
+                    };
+
+                    uint8_t epkt[VP_HEADER_WIRE_LEN];
+                    int elen = vp_encode_packet(epkt, sizeof(epkt), &err, NULL);
+                    if (elen > 0) {
+                        if (vp_os_udp_send(g_sock, &src, epkt, (size_t)elen) < 0)
+                            LOG_WARN("UDP send of ERROR (KEEPALIVE unknown) failed");
+                    }
+                    continue;
+                }
+
+                if (vp_switch_check_replay(src_client_id, hdr.seq) < 0) {
+                    LOG_DEBUG("Drop KEEPALIVE: replay or out-of-window (seq=%u)", hdr.seq);
+                    continue;
+                }
+
+                vp_switch_update_client(src_client_id, &src, now);
+                continue; // no frame forwarding
+            }
+
+            if (hdr.type == VP_PKT_HELLO) {
+                uint32_t new_id = vp_alloc_client_id();
+                if (new_id == 0) {
+                    printf("[switchd] ERROR: client table full!\n");
+                    continue;
+                }
+
+                vp_switch_update_client(new_id, &src, now);
+
+                vp_header_t ack = {
+                    .magic = VP_MAGIC,
+                    .version = VP_VERSION,
+                    .type = VP_PKT_HELLO_ACK,
                     .header_len = VP_HEADER_WIRE_LEN,
-                    .payload_len= 0,
-                    .flags      = 0,
-                    .client_id  = 0,
-                    .seq        = 0,
-                    .checksum   = 0
+                    .payload_len = 0,
+                    .flags = 0,
+                    .client_id = new_id,
+                    .seq = hdr.seq,
+                    .checksum = 0
                 };
 
-                uint8_t epkt[VP_HEADER_WIRE_LEN];
-                int elen = vp_encode_packet(epkt, sizeof(epkt), &err, NULL);
-                if (elen > 0) {
-                    if (vp_os_udp_send(g_sock, &src, epkt, (size_t)elen) < 0)
-                        LOG_WARN("UDP send of ERROR (KEEPALIVE unknown) failed");
+                uint8_t pkt[VP_HEADER_WIRE_LEN];
+                int ack_len = vp_encode_packet(pkt, sizeof(pkt), &ack, NULL);
+                if (ack_len > 0) {
+                    if (vp_os_udp_send(g_sock, &src, pkt, (size_t)ack_len) < 0)
+                        LOG_WARN("UDP send of HELLO_ACK failed");
                 }
                 continue;
             }
-
-            if (vp_switch_check_replay(src_client_id, hdr.seq) < 0) {
-                LOG_DEBUG("Drop KEEPALIVE: replay or out-of-window (seq=%u)", hdr.seq);
-                continue;
-            }
-
-            vp_switch_update_client(src_client_id, &src, now);
-            continue; // no frame forwarding
-        }
-
-        if (hdr.type == VP_PKT_HELLO) {
-            uint32_t new_id = vp_alloc_client_id();
-            if (new_id == 0) {
-                printf("[switchd] ERROR: client table full!\n");
-                continue;
-            }
-
-            vp_switch_update_client(new_id, &src, now);
-
-            vp_header_t ack = {
-                .magic = VP_MAGIC,
-                .version = VP_VERSION,
-                .type = VP_PKT_HELLO_ACK,
-                .header_len = VP_HEADER_WIRE_LEN,
-                .payload_len = 0,
-                .flags = 0,
-                .client_id = new_id,
-                .seq = hdr.seq,
-                .checksum = 0
-            };
-
-            uint8_t pkt[VP_HEADER_WIRE_LEN];
-            int ack_len = vp_encode_packet(pkt, sizeof(pkt), &ack, NULL);
-            if (ack_len > 0) {
-                if (vp_os_udp_send(g_sock, &src, pkt, (size_t)ack_len) < 0)
-                    LOG_WARN("UDP send of HELLO_ACK failed");
-            }
-            continue;
         }
     }
 
