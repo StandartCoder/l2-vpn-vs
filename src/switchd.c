@@ -147,7 +147,7 @@ static void forward_udp(uint32_t src_client_id,
 
 static uint32_t vp_alloc_client_id(void)
 {
-    for (uint32_t id = 1; id < VP_CLIENT_MAX; ++id) {
+    for (uint32_t id = 1; id < VP_MAX_CLIENTS; ++id) {
         struct vp_os_addr tmp;
         if (vp_switch_get_client_addr(id, &tmp) < 0) {
             return id;
