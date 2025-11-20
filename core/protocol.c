@@ -37,12 +37,10 @@ static uint32_t vp_read_u32_be(const uint8_t *p)
 // --------------------------------------
 // Simple keyed MAC (SipHash-2-4) + keys
 // --------------------------------------
-// g_vp_psk           : 128-bit key used as root key for derivations
-// g_vp_enc_key       : 256-bit key used for control-plane AEAD (HELLO/ACK/KEEPALIVE/ERROR)
-// g_vp_enc_key_data  : 256-bit key used for DATA traffic (per-session, derived from PSK + session id)
+// g_vp_psk      : 128-bit key used as root key for derivations
+// g_vp_enc_key  : 256-bit key used for ChaCha20-Poly1305 AEAD
 static uint8_t g_vp_psk[16];
 static uint8_t g_vp_enc_key[32];
-static uint8_t g_vp_enc_key_data[32];
 static int g_vp_psk_loaded = 0;
 
 // Forward declaration for KDF
@@ -291,21 +289,8 @@ static void vp_auth_load_key(void);
 // control-plane handshake.
 void vp_crypto_set_session(const uint8_t session_id[32])
 {
+    (void)session_id;
     vp_auth_load_key();
-
-    uint8_t label[4] = { 'D', 'A', 'T', 0 };
-    for (int i = 0; i < 4; i++) {
-        label[3] = (uint8_t)i;
-
-        uint8_t input[4 + 32];
-        memcpy(input, label, 4);
-        memcpy(input + 4, session_id, 32);
-
-        uint64_t v = vp_siphash24(g_vp_psk, input, sizeof(input));
-        for (int b = 0; b < 8; b++) {
-            g_vp_enc_key_data[i * 8 + b] = (uint8_t)(v >> (8 * b));
-        }
-    }
 }
 
 static void vp_auth_load_key(void)
@@ -318,7 +303,6 @@ static void vp_auth_load_key(void)
     const char *env = getenv("VP_PSK");
     memset(g_vp_psk, 0, sizeof(g_vp_psk));
     memset(g_vp_enc_key, 0, sizeof(g_vp_enc_key));
-    memset(g_vp_enc_key_data, 0, sizeof(g_vp_enc_key_data));
 
     if (!env || !env[0]) {
         fprintf(stderr,
@@ -607,9 +591,7 @@ int vp_encode_packet(vp_crypto_dir_t dir,
     if (payload && payload_len > 0)
         memcpy(buf + header_len, payload, payload_len);
 
-    const uint8_t *key = (hdr->type == VP_PKT_DATA)
-        ? g_vp_enc_key_data
-        : g_vp_enc_key;
+    const uint8_t *key = g_vp_enc_key;
 
     uint8_t nonce[12];
     vp_build_nonce(dir, &tmp, nonce);
@@ -671,9 +653,7 @@ int vp_decode_packet(vp_crypto_dir_t dir,
     if (payload_len > VP_MAX_FRAME_LEN)
         return -5;
 
-    const uint8_t *key = (hdr->type == VP_PKT_DATA)
-        ? g_vp_enc_key_data
-        : g_vp_enc_key;
+    const uint8_t *key = g_vp_enc_key;
 
     uint8_t nonce[12];
     vp_build_nonce(dir, hdr, nonce);
