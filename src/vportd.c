@@ -90,12 +90,19 @@ static int vp_do_handshake(struct vp_os_socket *sock,
     if (hello_seq == 0)
         hello_seq = 1;
 
+    uint8_t client_nonce[16];
+    uint64_t t = now;
+    for (int i = 0; i < 8; i++)
+        client_nonce[i] = (uint8_t)(t >> (8 * i));
+    for (int i = 0; i < 8; i++)
+        client_nonce[8 + i] = (uint8_t)(hello_seq >> (4 * i));
+
     vp_header_t hello = {
         .magic      = VP_MAGIC,
         .version    = VP_VERSION,
         .type       = VP_PKT_HELLO,
         .header_len = VP_HEADER_WIRE_LEN,
-        .payload_len= 0,
+        .payload_len= (uint16_t)sizeof(client_nonce),
         .flags      = VP_FLAG_FROM_CLIENT,
         .client_id  = 0,   // client_id not yet assigned
         .seq        = hello_seq,
@@ -108,9 +115,9 @@ static int vp_do_handshake(struct vp_os_socket *sock,
         printf("[vportd] Initial HELLO → requesting client_id\n");
     }
 
-    uint8_t hello_pkt[VP_HEADER_WIRE_LEN];
+    uint8_t hello_pkt[VP_HEADER_WIRE_LEN + 32];
     int hello_len = vp_encode_packet(VP_CRYPTO_DIR_CLIENT_TO_SWITCH,
-                                     hello_pkt, sizeof(hello_pkt), &hello, NULL);
+                                     hello_pkt, sizeof(hello_pkt), &hello, client_nonce);
     if (hello_len < 0) {
         printf("[vportd] Failed to encode HELLO packet\n");
         return -1;
@@ -145,12 +152,18 @@ static int vp_do_handshake(struct vp_os_socket *sock,
             if (hdr.seq != hello_seq)
                 continue;
 
+            if (hdr.payload_len != 16)
+                continue;
+
             g_client_id = hdr.client_id;
             printf("[vportd] %s client_id = %u\n",
                    is_reconnect ? "Re-assigned" : "Assigned",
                    g_client_id);
 
-            g_seq = 1;
+            uint8_t session_id[32];
+            memcpy(session_id, client_nonce, 16);
+            memcpy(session_id + 16, buf + hdr.header_len, 16);
+            vp_crypto_set_session(session_id);
 
             uint64_t t = vp_os_linux_get_time_ms();
             *last_recv      = t;
@@ -336,7 +349,6 @@ int main(int argc, char **argv)
                 printf("[vportd] Received ERROR packet (type=%u) → re-HELLO\n", hdr.type);
 
                 g_client_id = 0;
-                g_seq = 1;
 
                 if (vp_do_handshake(sock, &srv,
                                     &last_recv,

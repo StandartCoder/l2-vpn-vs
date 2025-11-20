@@ -358,23 +358,42 @@ int main(int argc, char **argv)
                 }
             }
 
+            if (hdr.payload_len != 16) {
+                LOG_DEBUG("Drop HELLO: invalid payload_len=%u", hdr.payload_len);
+                continue;
+            }
+
             vp_switch_update_client(cid, &src, now);
+
+            uint8_t session_id[32];
+            uint8_t *client_nonce = buf + hdr.header_len;
+            uint8_t server_nonce[16];
+            uint64_t t = now;
+            for (int i = 0; i < 8; i++)
+                server_nonce[i] = (uint8_t)(t >> (8 * i));
+            uint64_t mix = ((uint64_t)src.ip_be << 32) ^ (uint64_t)src.port_be;
+            for (int i = 0; i < 8; i++)
+                server_nonce[8 + i] = (uint8_t)(mix >> (8 * i));
+
+            memcpy(session_id, client_nonce, 16);
+            memcpy(session_id + 16, server_nonce, 16);
+            vp_crypto_set_session(session_id);
 
             vp_header_t ack = {
                 .magic = VP_MAGIC,
                 .version = VP_VERSION,
                 .type = VP_PKT_HELLO_ACK,
                 .header_len = VP_HEADER_WIRE_LEN,
-                .payload_len = 0,
+                .payload_len = (uint16_t)sizeof(server_nonce),
                 .flags = 0,
                 .client_id = cid,
                 .seq = hdr.seq,
                 .checksum = 0
             };
 
-                uint8_t pkt[VP_HEADER_WIRE_LEN];
+                uint8_t pkt[VP_HEADER_WIRE_LEN + 32];
                 int ack_len = vp_encode_packet(VP_CRYPTO_DIR_SWITCH_TO_CLIENT,
-                                               pkt, sizeof(pkt), &ack, NULL);
+                                               pkt, sizeof(pkt), &ack, server_nonce);
                 if (ack_len > 0) {
                     if (vp_os_udp_send(g_sock, &src, pkt, (size_t)ack_len) < 0)
                         LOG_WARN("UDP send of HELLO_ACK failed");

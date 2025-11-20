@@ -37,10 +37,12 @@ static uint32_t vp_read_u32_be(const uint8_t *p)
 // --------------------------------------
 // Simple keyed MAC (SipHash-2-4) + keys
 // --------------------------------------
-// g_vp_psk      : 128-bit key used as MAC key for SipHash-2-4
-// g_vp_enc_key  : 256-bit key used for ChaCha20 stream cipher
+// g_vp_psk           : 128-bit key used as root key for derivations
+// g_vp_enc_key       : 256-bit key used for control-plane AEAD (HELLO/ACK/KEEPALIVE/ERROR)
+// g_vp_enc_key_data  : 256-bit key used for DATA traffic (per-session, derived from PSK + session id)
 static uint8_t g_vp_psk[16];
 static uint8_t g_vp_enc_key[32];
+static uint8_t g_vp_enc_key_data[32];
 static int g_vp_psk_loaded = 0;
 
 // Forward declaration for KDF
@@ -49,10 +51,9 @@ static uint64_t vp_siphash24(const uint8_t key[16],
                              size_t len);
 
 // Derive a 128-bit key from an arbitrary-length passphrase using
-// a SipHash-based KDF with both CPU and memory cost. This is still
-// much simpler than a modern password hash (Argon2/scrypt), but it
-// makes naive offline guessing significantly more expensive than
-// using the raw passphrase bytes directly.
+// a SipHash-based PRF. This is *not* a password hardening function;
+// VP_PSK must already be high-entropy. We keep this very simple and
+// analyzable instead of trying to emulate a memory-hard KDF.
 static void vp_kdf_from_psk(const char *pass, size_t pass_len, uint8_t out_key[16])
 {
     static const uint8_t seed1[16] = {
@@ -66,74 +67,9 @@ static void vp_kdf_from_psk(const char *pass, size_t pass_len, uint8_t out_key[1
 
     const uint8_t *p = (const uint8_t *)pass;
 
-    // Initial mixing of passphrase into two 64-bit lanes
     uint64_t left  = vp_siphash24(seed1, p, pass_len);
     uint64_t right = vp_siphash24(seed2, p, pass_len);
 
-    // Memory-hard strengthening:
-    // Use a modest buffer (256 KiB) of 64-bit words and perform a
-    // data-dependent walk over it. This raises the cost of parallel
-    // brute-force (especially on GPUs/ASICs) compared to a purely
-    // CPU-bound KDF.
-    enum { VP_KDF_MEM_WORDS = 32768 }; // 32768 * 8 = 256 KiB
-    uint64_t *mem = (uint64_t *)malloc(VP_KDF_MEM_WORDS * sizeof(uint64_t));
-
-    if (mem) {
-        // Fill buffer deterministically from the initial lanes
-        for (size_t i = 0; i < VP_KDF_MEM_WORDS; i++) {
-            uint8_t block[16];
-            uint64_t x = left ^ (uint64_t)i;
-            uint64_t y = right ^ (uint64_t)(VP_KDF_MEM_WORDS - 1 - i);
-            for (int j = 0; j < 8; j++) {
-                block[j]     = (uint8_t)(x >> (8 * j));
-                block[8 + j] = (uint8_t)(y >> (8 * j));
-            }
-            uint64_t a = vp_siphash24(seed1, block, sizeof(block));
-            uint64_t b = vp_siphash24(seed2, block, sizeof(block));
-            mem[i] = a ^ b;
-        }
-
-        // Perform a data-dependent random walk over the buffer
-        const int rounds = 4096;
-        for (int r = 0; r < rounds; r++) {
-            size_t idx = (size_t)((left ^ right ^ (uint64_t)r) & (VP_KDF_MEM_WORDS - 1));
-            uint64_t v = mem[idx];
-
-            uint8_t tmp[8];
-            for (int j = 0; j < 8; j++)
-                tmp[j] = (uint8_t)(v >> (8 * j));
-
-            uint64_t a = vp_siphash24(seed1, tmp, sizeof(tmp));
-            uint64_t b = vp_siphash24(seed2, tmp, sizeof(tmp));
-
-            left  ^= a ^ v;
-            right ^= b ^ mem[(idx ^ (size_t)r) & (VP_KDF_MEM_WORDS - 1)];
-            mem[idx] = left ^ right;
-        }
-
-        // Fold buffer back into the lanes
-        for (size_t i = 0; i < VP_KDF_MEM_WORDS; i += 1024) {
-            left  ^= mem[i];
-            right ^= mem[i + 512];
-        }
-
-        free(mem);
-    } else {
-        // Fallback: purely CPU-bound strengthening if memory allocation fails.
-        const int rounds = 8192;
-        uint8_t buf[8];
-        for (int i = 0; i < rounds; i++) {
-            for (int j = 0; j < 8; j++)
-                buf[j] = (uint8_t)(left >> (8 * j));
-            left = vp_siphash24(seed1, buf, sizeof(buf));
-
-            for (int j = 0; j < 8; j++)
-                buf[j] = (uint8_t)(right >> (8 * j));
-            right = vp_siphash24(seed2, buf, sizeof(buf));
-        }
-    }
-
-    // Export as 16-byte little-endian key
     for (int i = 0; i < 8; i++) {
         out_key[i]      = (uint8_t)(left >> (8 * i));
         out_key[8 + i]  = (uint8_t)(right >> (8 * i));
@@ -348,6 +284,28 @@ static void vp_build_nonce(vp_crypto_dir_t dir,
     vp_store_u32_le(nonce + 8, hdr->seq);
 }
 
+// Update the per-session DATA key based on a caller-provided
+// session identifier that is shared between both peers via the
+// control-plane handshake.
+void vp_crypto_set_session(const uint8_t session_id[32])
+{
+    vp_auth_load_key();
+
+    uint8_t label[4] = { 'D', 'A', 'T', 0 };
+    for (int i = 0; i < 4; i++) {
+        label[3] = (uint8_t)i;
+
+        uint8_t input[4 + 32];
+        memcpy(input, label, 4);
+        memcpy(input + 4, session_id, 32);
+
+        uint64_t v = vp_siphash24(g_vp_psk, input, sizeof(input));
+        for (int b = 0; b < 8; b++) {
+            g_vp_enc_key_data[i * 8 + b] = (uint8_t)(v >> (8 * b));
+        }
+    }
+}
+
 static void vp_auth_load_key(void)
 {
     if (g_vp_psk_loaded)
@@ -358,6 +316,7 @@ static void vp_auth_load_key(void)
     const char *env = getenv("VP_PSK");
     memset(g_vp_psk, 0, sizeof(g_vp_psk));
     memset(g_vp_enc_key, 0, sizeof(g_vp_enc_key));
+    memset(g_vp_enc_key_data, 0, sizeof(g_vp_enc_key_data));
 
     if (!env || !env[0]) {
         fprintf(stderr,
@@ -385,6 +344,10 @@ static void vp_auth_load_key(void)
             g_vp_enc_key[i * 8 + b] = (uint8_t)(v >> (8 * b));
         }
     }
+
+    // Default DATA key equals control-plane key until a session id
+    // is explicitly configured via vp_crypto_set_session().
+    memcpy(g_vp_enc_key_data, g_vp_enc_key, sizeof(g_vp_enc_key_data));
 }
 
 static void vp_pack_header(uint8_t *buf, const vp_header_t *hdr)
@@ -642,15 +605,19 @@ int vp_encode_packet(vp_crypto_dir_t dir,
     if (payload && payload_len > 0)
         memcpy(buf + header_len, payload, payload_len);
 
+    const uint8_t *key = (hdr->type == VP_PKT_DATA)
+        ? g_vp_enc_key_data
+        : g_vp_enc_key;
+
     uint8_t nonce[12];
     vp_build_nonce(dir, &tmp, nonce);
 
     if (payload_len > 0 && hdr->type == VP_PKT_DATA) {
-        vp_chacha20_xor(g_vp_enc_key, nonce, 1, buf + header_len, payload_len);
+        vp_chacha20_xor(key, nonce, 1, buf + header_len, payload_len);
     }
 
     uint8_t block0[64];
-    vp_chacha20_block(g_vp_enc_key, nonce, 0, block0);
+    vp_chacha20_block(key, nonce, 0, block0);
     uint8_t otk[32];
     memcpy(otk, block0, sizeof(otk));
 
@@ -702,11 +669,15 @@ int vp_decode_packet(vp_crypto_dir_t dir,
     if (payload_len > VP_MAX_FRAME_LEN)
         return -5;
 
+    const uint8_t *key = (hdr->type == VP_PKT_DATA)
+        ? g_vp_enc_key_data
+        : g_vp_enc_key;
+
     uint8_t nonce[12];
     vp_build_nonce(dir, hdr, nonce);
 
     uint8_t block0[64];
-    vp_chacha20_block(g_vp_enc_key, nonce, 0, block0);
+    vp_chacha20_block(key, nonce, 0, block0);
     uint8_t otk[32];
     memcpy(otk, block0, sizeof(otk));
 
@@ -724,7 +695,7 @@ int vp_decode_packet(vp_crypto_dir_t dir,
         return -6;
 
     if (payload_len > 0 && hdr->type == VP_PKT_DATA) {
-        vp_chacha20_xor(g_vp_enc_key, nonce, 1, buf + header_len, payload_len);
+        vp_chacha20_xor(key, nonce, 1, buf + header_len, payload_len);
     }
 
     return 0;

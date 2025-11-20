@@ -46,4 +46,8 @@ int vp_decode_packet(vp_crypto_dir_t dir,
                      uint8_t *buf, size_t buf_len,
                      vp_header_t *hdr);
 
+// Derive per-session DATA keys from the PSK-based root key.
+// session_id must be identical on both sides of the connection.
+void vp_crypto_set_session(const uint8_t session_id[32]);
+
 #endif
