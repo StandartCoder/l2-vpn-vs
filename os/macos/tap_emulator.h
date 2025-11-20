@@ -3,6 +3,7 @@
 #ifdef __APPLE__
 #include <stdint.h>
 #include <stddef.h>
+#include <sys/types.h> // ssize_t
 
 // Create an emulated TAP device backed by vmnet.
 // Returns the file descriptor exposed to the application (like /dev/tap0), or -1 on error.

@@ -4,33 +4,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <pthread.h>
+#include <sys/types.h>
 #include <sys/queue.h>
 #include <sys/uio.h>
-#include <pthread.h>
 
 struct vmnet_backend {
-    vmnet_interface_ref iface;
+    xpc_object_t iface;   // vmnet interface reference (opaque xpc_object_t)
     dispatch_queue_t queue;
     xpc_object_t if_desc;
     pthread_mutex_t lock;
     int started;
     int stop;
 };
-
-static vmnet_return_t vmnet_start_blocking(struct vmnet_backend *ctx)
-{
-    __block vmnet_return_t start_ret = VMNET_FAILURE;
-
-    vmnet_start_interface(ctx->if_desc, ctx->queue, ^(vmnet_return_t status, vmnet_interface_ref interface_ref) {
-        start_ret = status;
-        if (status == VMNET_SUCCESS)
-            ctx->iface = interface_ref;
-    });
-
-    // Busy-wait until start_ret updated (on the same dispatch queue)
-    // In practice vmnet_start_interface invokes callback before returning.
-    return start_ret;
-}
 
 int vmnet_backend_init(struct vmnet_backend **out)
 {
@@ -56,13 +42,23 @@ int vmnet_backend_init(struct vmnet_backend **out)
 
     ctx->if_desc = if_desc;
 
-    vmnet_return_t ret = vmnet_start_blocking(ctx);
-    if (ret != VMNET_SUCCESS || ctx->iface == NULL) {
+    __block vmnet_return_t start_ret = VMNET_FAILURE;
+    __block xpc_object_t started_iface = NULL;
+
+    vmnet_start_interface(ctx->if_desc, ctx->queue, ^(vmnet_return_t status, xpc_object_t interface_ref) {
+        start_ret = status;
+        if (status == VMNET_SUCCESS)
+            started_iface = interface_ref;
+    });
+
+    if (start_ret != VMNET_SUCCESS || started_iface == NULL) {
         vmnet_backend_close(ctx);
         return -1;
     }
 
+    ctx->iface = started_iface;
     ctx->started = 1;
+
     *out = ctx;
     return 0;
 }
@@ -72,17 +68,20 @@ ssize_t vmnet_backend_read(struct vmnet_backend *ctx, uint8_t *buf, size_t len)
     if (!ctx || !ctx->started || !buf || len == 0)
         return -1;
 
-    // The vmnet_read() API uses iovec for scatter/gather reads.
+    struct vmpktdesc pkt = {0};
+    pkt.vm_pkt_iovcnt = 1;
+    pkt.vm_pkt_size = len;
     struct iovec iov;
     iov.iov_base = buf;
     iov.iov_len = len;
+    pkt.vm_pkt_iov = &iov;
 
-    ssize_t bytes_read = -1;
-    vmnet_return_t ret = vmnet_read(ctx->iface, &iov, 1, &bytes_read);
-    if (ret == VMNET_SUCCESS && bytes_read >= 0)
-        return bytes_read;
+    int pkts = 1;
+    vmnet_return_t ret = vmnet_read(ctx->iface, &pkt, &pkts);
+    if (ret == VMNET_SUCCESS && pkts == 1)
+        return (ssize_t)pkt.vm_pkt_size;
 
-    if (ret == VMNET_BUFFER_EXHAUSTED || ret == VMNET_WOULD_BLOCK) {
+    if (ret == VMNET_BUFFER_EXHAUSTED) {
         errno = EAGAIN;
         return -1;
     }
@@ -96,16 +95,20 @@ ssize_t vmnet_backend_write(struct vmnet_backend *ctx, const uint8_t *buf, size_
     if (!ctx || !ctx->started || !buf || len == 0)
         return -1;
 
+    struct vmpktdesc pkt = {0};
+    pkt.vm_pkt_iovcnt = 1;
+    pkt.vm_pkt_size = len;
     struct iovec iov;
     iov.iov_base = (void *)buf;
     iov.iov_len = len;
+    pkt.vm_pkt_iov = &iov;
 
-    ssize_t bytes_written = -1;
-    vmnet_return_t ret = vmnet_write(ctx->iface, &iov, 1, &bytes_written);
-    if (ret == VMNET_SUCCESS && bytes_written == (ssize_t)len)
-        return bytes_written;
+    int pkts = 1;
+    vmnet_return_t ret = vmnet_write(ctx->iface, &pkt, &pkts);
+    if (ret == VMNET_SUCCESS && pkts == 1)
+        return (ssize_t)len;
 
-    if (ret == VMNET_WOULD_BLOCK || ret == VMNET_BUFFER_EXHAUSTED) {
+    if (ret == VMNET_BUFFER_EXHAUSTED) {
         errno = EAGAIN;
         return -1;
     }
@@ -122,7 +125,9 @@ void vmnet_backend_close(struct vmnet_backend *ctx)
     ctx->stop = 1;
 
     if (ctx->iface) {
-        vmnet_stop_interface(ctx->iface, NULL);
+        vmnet_stop_interface(ctx->iface, ctx->queue, ^(vmnet_return_t status) {
+            (void)status;
+        });
         ctx->iface = NULL;
     }
 
@@ -132,7 +137,6 @@ void vmnet_backend_close(struct vmnet_backend *ctx)
     }
 
     if (ctx->queue) {
-        // Dispatch queues are reference counted; release it.
         dispatch_release(ctx->queue);
         ctx->queue = NULL;
     }
