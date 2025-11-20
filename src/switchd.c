@@ -331,26 +331,34 @@ int main(int argc, char **argv)
                 continue; // no frame forwarding
             }
 
-            if (hdr.type == VP_PKT_HELLO) {
-                uint32_t new_id = vp_alloc_client_id();
-                if (new_id == 0) {
+        if (hdr.type == VP_PKT_HELLO) {
+            // Reuse existing client_id for this address on reconnect to
+            // keep MAC bindings stable and avoid stale entries. If none
+            // exists, allocate a fresh client_id.
+            uint32_t cid;
+            if (vp_switch_get_client_id_for_addr(&src, &cid) == 0) {
+                vp_switch_reset_client(cid);
+            } else {
+                cid = vp_alloc_client_id();
+                if (cid == 0) {
                     printf("[switchd] ERROR: client table full!\n");
                     continue;
                 }
+            }
 
-                vp_switch_update_client(new_id, &src, now);
+            vp_switch_update_client(cid, &src, now);
 
-                vp_header_t ack = {
-                    .magic = VP_MAGIC,
-                    .version = VP_VERSION,
-                    .type = VP_PKT_HELLO_ACK,
-                    .header_len = VP_HEADER_WIRE_LEN,
-                    .payload_len = 0,
-                    .flags = 0,
-                    .client_id = new_id,
-                    .seq = hdr.seq,
-                    .checksum = 0
-                };
+            vp_header_t ack = {
+                .magic = VP_MAGIC,
+                .version = VP_VERSION,
+                .type = VP_PKT_HELLO_ACK,
+                .header_len = VP_HEADER_WIRE_LEN,
+                .payload_len = 0,
+                .flags = 0,
+                .client_id = cid,
+                .seq = hdr.seq,
+                .checksum = 0
+            };
 
                 uint8_t pkt[VP_HEADER_WIRE_LEN];
                 int ack_len = vp_encode_packet(pkt, sizeof(pkt), &ack, NULL);

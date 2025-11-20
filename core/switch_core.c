@@ -264,6 +264,30 @@ int vp_switch_check_replay(uint32_t client_id, uint32_t seq)
     return 0;
 }
 
+void vp_switch_reset_client(uint32_t client_id)
+{
+    if (client_id == 0 || client_id >= VP_CLIENT_MAX)
+        return;
+
+    vp_client_entry_t *e = &client_table[client_id];
+    if (!e->in_use)
+        return;
+
+    // Reset replay tracking
+    e->highest_seq = 0;
+    e->replay_window = 0;
+
+    // Drop all MAC bindings that point to this client so they can
+    // be re-learned cleanly after reconnect.
+    for (int b = 0; b < VP_MAC_BUCKETS; b++) {
+        for (int i = 0; i < VP_MAC_BUCKET_SIZE; i++) {
+            vp_mac_entry_t *m = &mac_table[b][i];
+            if (m->in_use && m->client_id == client_id)
+                m->in_use = 0;
+        }
+    }
+}
+
 void vp_switch_init(void)
 {
     memset(mac_table, 0, sizeof(mac_table));

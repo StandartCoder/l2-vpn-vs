@@ -32,6 +32,9 @@ int vp_switch_get_client_id_for_addr(const struct vp_os_addr *addr,
 // Returns 0 on accept, <0 on replay/too-old/invalid.
 int vp_switch_check_replay(uint32_t client_id, uint32_t seq);
 
+// Reset per-client volatile state (replay window, MAC bindings) on reconnect.
+void vp_switch_reset_client(uint32_t client_id);
+
 // Callback used by switch_core to forward frames
 typedef void (*vp_forward_cb)(
     uint32_t src_client_id,
