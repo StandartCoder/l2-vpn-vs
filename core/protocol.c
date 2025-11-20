@@ -330,10 +330,6 @@ static void vp_auth_load_key(void)
             g_vp_enc_key[i * 8 + b] = (uint8_t)(v >> (8 * b));
         }
     }
-
-    // Default DATA key equals control-plane key until a session id
-    // is explicitly configured via vp_crypto_set_session().
-    memcpy(g_vp_enc_key_data, g_vp_enc_key, sizeof(g_vp_enc_key_data));
 }
 
 static void vp_pack_header(uint8_t *buf, const vp_header_t *hdr)
