@@ -2,6 +2,7 @@
 #include "../../include/os_tap.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 
 // On macOS we require a /dev/tapX style device as provided
 // by a tun/tap kernel extension (e.g. tuntaposx). The daemon
