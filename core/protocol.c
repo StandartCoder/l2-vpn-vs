@@ -284,6 +284,8 @@ static void vp_build_nonce(vp_crypto_dir_t dir,
     vp_store_u32_le(nonce + 8, hdr->seq);
 }
 
+static void vp_auth_load_key(void);
+
 // Update the per-session DATA key based on a caller-provided
 // session identifier that is shared between both peers via the
 // control-plane handshake.
