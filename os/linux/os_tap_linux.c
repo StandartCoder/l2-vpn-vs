@@ -72,17 +72,17 @@ int vp_os_tap_read(struct vp_os_tap *tap, uint8_t *buf, size_t max_len)
 
 int vp_os_tap_write(struct vp_os_tap *tap, const uint8_t *buf, size_t len)
 {
-    size_t off = 0;
-
-    while (off < len) {
-        ssize_t w = write(tap->fd, buf + off, len - off);
+    for (;;) {
+        ssize_t w = write(tap->fd, buf, len);
         if (w > 0) {
-            off += (size_t)w;
-            continue;
+            // TAP expects whole frames; treat partial writes as failure.
+            if ((size_t)w == len)
+                return (int)w;
+            return -1;
         }
 
         if (w == 0)
-            continue;
+            return 0;
 
         if (errno == EINTR)
             continue;
@@ -94,8 +94,6 @@ int vp_os_tap_write(struct vp_os_tap *tap, const uint8_t *buf, size_t len)
 
         return -1;
     }
-
-    return (int)len;
 }
 
 void vp_os_tap_close(struct vp_os_tap *tap)
