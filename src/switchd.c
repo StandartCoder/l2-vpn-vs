@@ -137,21 +137,12 @@ static void forward_udp(uint32_t src_client_id,
 
 static uint32_t vp_alloc_client_id(void)
 {
-    static uint32_t next_id = 1;
-
-    // Perform a bounded circular search over the valid client_id range
-    // [1, VP_MAX_CLIENTS-1]. If all slots are in use, return 0.
-    for (uint32_t attempts = 0; attempts < (uint32_t)(VP_MAX_CLIENTS - 1); attempts++) {
-        if (next_id >= VP_MAX_CLIENTS)
-            next_id = 1;
-
-        uint32_t id = next_id++;
-
+    for (uint32_t id = 1; id < VP_CLIENT_MAX; ++id) {
         struct vp_os_addr tmp;
-        if (vp_switch_get_client_addr(id, &tmp) < 0)
+        if (vp_switch_get_client_addr(id, &tmp) < 0) {
             return id;
+        }
     }
-
     return 0; // no free ID (full)
 }
 
