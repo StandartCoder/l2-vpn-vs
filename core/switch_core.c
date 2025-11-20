@@ -1,5 +1,6 @@
 #include "switch_core.h"
 #include <string.h>
+#include <time.h>
 
 #include "../include/os_net.h"
 
@@ -23,6 +24,26 @@ typedef struct {
 } vp_client_addr_entry_t;
 
 static vp_client_addr_entry_t client_addr_table[VP_CLIENT_ADDR_BUCKETS][VP_CLIENT_ADDR_BUCKET_SIZE];
+
+// Per-bucket / per-client jitter for aging timers, in milliseconds.
+// This prevents MAC and client entries from expiring in a perfectly
+// synchronized way and makes it harder to take "snapshot" control
+// of the table timing.
+#define VP_MAC_JITTER_MS 5000
+static uint32_t g_mac_bucket_jitter[VP_MAC_BUCKETS];
+static uint32_t g_client_jitter[VP_CLIENT_MAX];
+
+static uint32_t g_prng_state = 1u;
+
+static uint32_t vp_prng_next(void)
+{
+    uint32_t x = g_prng_state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    g_prng_state = x ? x : 1u;
+    return g_prng_state;
+}
 
 // Global flood control (simple token bucket in packets)
 static uint64_t g_flood_last_refill_ms = 0;
@@ -320,6 +341,17 @@ void vp_switch_init(void)
     memset(mac_table, 0, sizeof(mac_table));
     memset(client_table, 0, sizeof(client_table));
     memset(client_addr_table, 0, sizeof(client_addr_table));
+
+    // Initialize PRNG and jitter tables for aging.
+    uint32_t seed = (uint32_t)time(NULL);
+    g_prng_state = seed ? seed : 1u;
+
+    for (int b = 0; b < VP_MAC_BUCKETS; b++) {
+        g_mac_bucket_jitter[b] = vp_prng_next() % VP_MAC_JITTER_MS;
+    }
+    for (uint32_t cid = 0; cid < VP_CLIENT_MAX; cid++) {
+        g_client_jitter[cid] = vp_prng_next() % VP_MAC_JITTER_MS;
+    }
 }
 
 void vp_switch_handle_frame(
@@ -406,7 +438,9 @@ void vp_switch_flush_stale(uint64_t now_ms)
             if (!mac_table[b][i].in_use)
                 continue;
 
-            if (now_ms - mac_table[b][i].last_seen_ms > VP_MAC_TIMEOUT_MS) {
+            uint64_t age = now_ms - mac_table[b][i].last_seen_ms;
+            uint32_t jitter = g_mac_bucket_jitter[b];
+            if (age > (uint64_t)VP_MAC_TIMEOUT_MS + jitter) {
                 mac_table[b][i].in_use = 0;
             }
         }
@@ -417,7 +451,9 @@ void vp_switch_flush_stale(uint64_t now_ms)
         if (!e->in_use)
             continue;
 
-        if (now_ms - e->last_seen_ms > VP_MAC_TIMEOUT_MS) {
+        uint64_t age = now_ms - e->last_seen_ms;
+        uint32_t jitter = g_client_jitter[cid];
+        if (age > (uint64_t)VP_MAC_TIMEOUT_MS + jitter) {
             client_addr_remove(&e->addr, e->client_id);
             e->in_use = 0;
         }
